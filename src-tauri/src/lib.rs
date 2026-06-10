@@ -120,9 +120,12 @@ mod app_init {
     /// Setup window state management
     pub fn setup_window_state(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         logging!(info, Type::Setup, "初始化窗口状态管理...");
+        // 不恢复窗口尺寸，始终用 window.rs 里的默认尺寸打开（保留位置/最大化等其它状态）
+        let mut state_flags = tauri_plugin_window_state::StateFlags::all();
+        state_flags.remove(tauri_plugin_window_state::StateFlags::SIZE);
         let window_state_plugin = tauri_plugin_window_state::Builder::new()
             .with_filename(files::WINDOW_STATE)
-            .with_state_flags(tauri_plugin_window_state::StateFlags::default())
+            .with_state_flags(state_flags)
             .build();
         app.handle().plugin(window_state_plugin)?;
         Ok(())
