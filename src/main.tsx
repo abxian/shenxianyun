@@ -1,3 +1,5 @@
+import './dev-tauri-mock'
+
 import './assets/styles/index.scss'
 
 import { ResizeObserver } from '@juggle/resize-observer'

@@ -82,7 +82,7 @@ const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.4.9'
 const DESKTOP_PLATFORM = getSystem()
 const fieldSx = {
   '& .MuiInputLabel-root': {
-    color: 'rgba(36,46,66,.66)',
+    color: 'rgba(33,43,64,.82)',
   },
   '& .MuiInputLabel-root.Mui-focused': {
     color: '#1c8dff',
@@ -1128,13 +1128,14 @@ const HomePage = () => {
           height: '100%',
           minHeight: 0,
           display: 'flex',
-          alignItems: 'center',
+          alignItems: 'flex-start',
           justifyContent: 'center',
-          px: 1,
-          py: 0.75,
+          px: 1.5,
+          py: 1.5,
+          overflow: 'auto',
           position: 'relative',
           background:
-            'radial-gradient(circle at 16% 10%, rgba(96,190,255,.24), transparent 34%), radial-gradient(circle at 86% 16%, rgba(255,128,170,.18), transparent 32%), linear-gradient(135deg, #eef6ff 0%, #f7f8fb 52%, #fff3f7 100%)',
+            'radial-gradient(1200px 520px at 50% -8%, rgba(28,141,255,.16), transparent 60%), linear-gradient(168deg, #0f2747 0%, #15315a 46%, #0e2444 100%)',
         }}
       >
         <Box
@@ -1170,13 +1171,13 @@ const HomePage = () => {
                 sx={{
                   fontWeight: 900,
                   letterSpacing: 0,
-                  color: '#172033',
-                  textShadow: '0 10px 30px rgba(28,141,255,.12)',
+                  color: '#ffffff',
+                  textShadow: '0 2px 20px rgba(28,141,255,.5)',
                 }}
               >
                 神仙云
               </Typography>
-              <Typography sx={{ color: 'rgba(36,46,66,.68)', fontSize: 12 }}>
+              <Typography sx={{ color: 'rgba(226,236,250,.82)', fontSize: 12 }}>
                 提取码订阅 · 节点选择 · 一键连接
               </Typography>
             </Box>
@@ -1212,10 +1213,10 @@ const HomePage = () => {
             sx={{
               borderRadius: '22px',
               p: 1.15,
-              border: '1px solid rgba(70,100,145,.16)',
-              bgcolor: 'rgba(255,255,255,.76)',
+              border: '1px solid rgba(255,255,255,.22)',
+              bgcolor: 'rgba(255,255,255,.96)',
               boxShadow:
-                '0 22px 58px rgba(42,65,105,.16), 0 0 0 1px rgba(255,255,255,.55), inset 0 1px 0 rgba(255,255,255,.9)',
+                '0 28px 70px rgba(4,16,38,.5), 0 0 0 1px rgba(255,255,255,.4), inset 0 1px 0 rgba(255,255,255,.95)',
               backdropFilter: 'blur(20px)',
               overflow: 'hidden',
               position: 'relative',
@@ -1304,7 +1305,7 @@ const HomePage = () => {
                     }}
                   />
                   <Typography
-                    sx={{ fontSize: 13, color: 'rgba(36,46,66,.66)' }}
+                    sx={{ fontSize: 13, color: 'rgba(33,43,64,.86)', fontWeight: 600 }}
                   >
                     {savedCode ? '提取码已绑定' : activeProfileName}
                   </Typography>
@@ -1325,9 +1326,9 @@ const HomePage = () => {
                   minWidth: 0,
                   borderRadius: '16px',
                   p: 1,
-                  border: '1px solid rgba(70,100,145,.14)',
-                  bgcolor: 'rgba(255,255,255,.58)',
-                  boxShadow: 'inset 0 1px 0 rgba(255,255,255,.72)',
+                  border: '1px solid rgba(45,65,105,.12)',
+                  bgcolor: 'rgba(244,248,253,.95)',
+                  boxShadow: 'inset 0 1px 0 rgba(255,255,255,.9)',
                 }}
               >
                 <Stack
@@ -1352,7 +1353,7 @@ const HomePage = () => {
                         minHeight: 34,
                         borderColor: 'rgba(45,65,105,.16)',
                         fontWeight: 700,
-                        color: 'rgba(36,46,66,.72)',
+                        color: 'rgba(33,43,64,.9)',
                         '&.Mui-selected': {
                           color: '#fff',
                           bgcolor: '#1c8dff',
@@ -1445,6 +1446,35 @@ const HomePage = () => {
                         }}
                       >
                         安装 TUN
+                      </Button>
+                    )}
+                    {isTunModeAvailable && !tunOn && (
+                      <Button
+                        variant="outlined"
+                        color="success"
+                        startIcon={<LanRounded />}
+                        disabled={busy}
+                        sx={{ flex: '1 1 110px' }}
+                        onClick={async () => {
+                          setBusy(true)
+                          setStatus('正在开启 TUN...')
+                          try {
+                            await patchVerge({ enable_tun_mode: true })
+                            await mutateSystemState()
+                            await refreshAll()
+                            setStatus('TUN 已开启')
+                          } catch (error) {
+                            setStatus(
+                              error instanceof Error
+                                ? error.message
+                                : String(error),
+                            )
+                          } finally {
+                            setBusy(false)
+                          }
+                        }}
+                      >
+                        开启 TUN
                       </Button>
                     )}
                     {tunOn && (
