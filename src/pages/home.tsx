@@ -38,12 +38,14 @@ import {
 } from '@mui/material'
 import { invoke } from '@tauri-apps/api/core'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
+import { relaunch } from '@tauri-apps/plugin-process'
 import { useLockFn } from 'ahooks'
 import yaml from 'js-yaml'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { BasePage } from '@/components/base'
 import { useClash } from '@/hooks/use-clash'
+import { useUpdate } from '@/hooks/use-update'
 import { useConnectionData } from '@/hooks/use-connection-data'
 import { useProfiles } from '@/hooks/use-profiles'
 import { useProxySelection } from '@/hooks/use-proxy-selection'
@@ -382,6 +384,22 @@ const HomePage = () => {
   const [desktopUpdate, setDesktopUpdate] =
     useState<DesktopVersionResponse | null>(null)
   const [busy, setBusy] = useState(false)
+  const [updating, setUpdating] = useState(false)
+  const { updateInfo } = useUpdate(true)
+  const doUpdate = useLockFn(async () => {
+    if (!updateInfo?.available || updating) return
+    setUpdating(true)
+    setStatus('正在下载更新...')
+    try {
+      await updateInfo.downloadAndInstall()
+      setStatus('更新完成，正在重启...')
+      await relaunch()
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error))
+    } finally {
+      setUpdating(false)
+    }
+  })
   const [delayTesting, setDelayTesting] = useState(false)
   const [delaySortTick, setDelaySortTick] = useState(0)
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -720,7 +738,8 @@ const HomePage = () => {
   }, [])
 
   useEffect(() => {
-    checkDesktopUpdate().catch(() => undefined)
+    // jc116 桌面版本检查已停用，改用 Tauri updater（GitHub releases 签名自动更新）
+    // checkDesktopUpdate().catch(() => undefined)
   }, [checkDesktopUpdate])
 
   useEffect(() => {
@@ -1157,6 +1176,45 @@ const HomePage = () => {
             minHeight: 0,
           }}
         >
+          {updateInfo?.available && (
+            <Box
+              sx={{
+                borderRadius: '14px',
+                px: 1.5,
+                py: 1,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1.5,
+                flexWrap: 'wrap',
+                border: '1px solid rgba(41,201,156,.55)',
+                bgcolor: 'rgba(41,201,156,.16)',
+              }}
+            >
+              <BoltRounded sx={{ color: '#28c99c' }} />
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                <Typography sx={{ fontWeight: 850, color: '#eafff8' }}>
+                  发现新版本 v{updateInfo.version}
+                </Typography>
+                <Typography
+                  sx={{ fontSize: 12, color: 'rgba(214,240,250,.82)' }}
+                >
+                  点击「立即更新」自动下载并安装，完成后自动重启。
+                </Typography>
+              </Box>
+              <Button
+                variant="contained"
+                disabled={updating}
+                onClick={doUpdate}
+                sx={{
+                  bgcolor: '#28c99c',
+                  fontWeight: 800,
+                  '&:hover': { bgcolor: '#22b489' },
+                }}
+              >
+                {updating ? '更新中…' : '立即更新'}
+              </Button>
+            </Box>
+          )}
           <Stack
             direction={{ xs: 'column', sm: 'row' }}
             spacing={1}
