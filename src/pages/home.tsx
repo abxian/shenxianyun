@@ -344,7 +344,7 @@ const delayRank = (proxy: IProxyItem, groupName = '') => {
 const HomePage = () => {
   const { verge, patchVerge } = useVerge()
   const { response: connectionResponse } = useConnectionData()
-  const { patchClash } = useClash()
+  const { clash, patchClash } = useClash()
   const { profiles, current, mutateProfiles } = useProfiles()
   const { proxies, clashConfig, refreshAll, refreshClashConfig, refreshProxy } =
     useAppData()
@@ -429,7 +429,7 @@ const HomePage = () => {
     savedCode && code.trim() && code.trim() !== savedCode,
   )
   const codeExpired = Boolean(expiresAt && nowMs > parseExpireTime(expiresAt))
-  const allowLanOn = clashConfig?.allowLan ?? false
+  const allowLanOn = clash?.['allow-lan'] ?? false
   const dnsOverwriteOn = verge?.enable_dns_settings ?? false
   const proxyGuardOn = verge?.enable_proxy_guard ?? true
   const powerHint = running ? '已启动，点击停止' : '还没有启动，点击启动'
