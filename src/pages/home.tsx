@@ -54,6 +54,7 @@ import { useSystemState } from '@/hooks/use-system-state'
 import { useVerge } from '@/hooks/use-verge'
 import { useAppData } from '@/providers/app-data-context'
 import {
+  enhanceProfiles,
   getProfiles,
   importProfile,
   installService,
@@ -179,9 +180,20 @@ type RuleSnapshot = {
 
 type TrafficRuleItem = {
   raw: string
-  domain: string
+  type: string
+  value: string
   policy: string
 }
+
+const TRAFFIC_RULE_TYPES = [
+  { name: 'DOMAIN-SUFFIX', label: '域名后缀', domain: true },
+  { name: 'DOMAIN', label: '完整域名', domain: true },
+  { name: 'DOMAIN-KEYWORD', label: '域名关键词', domain: true },
+  { name: 'IP-CIDR', label: 'IP 段', domain: false },
+  { name: 'GEOSITE', label: '网站类别', domain: false },
+  { name: 'GEOIP', label: '地区 IP', domain: false },
+  { name: 'PROCESS-NAME', label: '进程名', domain: false },
+] as const
 
 class AccessCodeStateError extends Error {
   constructor(
@@ -284,12 +296,13 @@ const parseTrafficRule = (rule: unknown): TrafficRuleItem | null => {
   if (typeof rule !== 'string') return null
   const parts = rule.split(',').map((part) => part.trim())
   if (parts.length < 3) return null
-  if (!['DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD'].includes(parts[0])) {
+  if (!TRAFFIC_RULE_TYPES.some((t) => t.name === parts[0])) {
     return null
   }
   return {
     raw: rule,
-    domain: parts[1],
+    type: parts[0],
+    value: parts[1],
     policy: parts[2],
   }
 }
@@ -379,6 +392,7 @@ const HomePage = () => {
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [trafficRuleOpen, setTrafficRuleOpen] = useState(false)
   const [trafficRuleInput, setTrafficRuleInput] = useState('')
+  const [trafficRuleType, setTrafficRuleType] = useState('DOMAIN-SUFFIX')
   const [trafficRulePolicy, setTrafficRulePolicy] = useState('')
   const [trafficRules, setTrafficRules] = useState<TrafficRuleItem[]>([])
   const [desktopUpdate, setDesktopUpdate] =
@@ -475,7 +489,9 @@ const HomePage = () => {
   const dnsOverwriteOn = verge?.enable_dns_settings ?? false
   const proxyGuardOn = verge?.enable_proxy_guard ?? true
   const powerHint = running ? '已启动，点击停止' : '还没有启动，点击启动'
-  const rulesProfileUid = current?.option?.rules || ''
+  // 统一写入全局 Merge 配置（UID 固定为 "Merge"，系统保证存在），对所有订阅生效，
+  // 不再依赖订阅自带的 option.rules（神仙云订阅通常没有，会导致无法编辑）。
+  const rulesProfileUid = 'Merge'
   const rulePolicies = useMemo(() => {
     const values = [
       primaryGroup?.name,
@@ -1025,11 +1041,15 @@ const HomePage = () => {
     try {
       const content = await readProfileFile(rulesProfileUid)
       const data = yaml.load(content) as {
-        prepend?: unknown
-        append?: unknown
+        'prepend-rules'?: unknown
+        'append-rules'?: unknown
       } | null
-      const prepend = Array.isArray(data?.prepend) ? data.prepend : []
-      const append = Array.isArray(data?.append) ? data.append : []
+      const prepend = Array.isArray(data?.['prepend-rules'])
+        ? data['prepend-rules']
+        : []
+      const append = Array.isArray(data?.['append-rules'])
+        ? data['append-rules']
+        : []
       setTrafficRules(
         [...prepend, ...append]
           .map(parseTrafficRule)
@@ -1040,50 +1060,58 @@ const HomePage = () => {
     }
   }, [rulesProfileUid])
 
-  const saveTrafficRuleAppend = async (nextAppendRule: string) => {
-    if (!rulesProfileUid) throw new Error('当前订阅没有可编辑的规则文件')
-
+  const saveTrafficRuleAppend = async (nextRule: string) => {
     const content = await readProfileFile(rulesProfileUid)
     const data = (yaml.load(content) as Record<string, unknown> | null) || {}
-    const next = parseTrafficRule(nextAppendRule)
-    const removeSameDomain = (rules: unknown[]) =>
+    const next = parseTrafficRule(nextRule)
+    const removeSameTarget = (rules: unknown[]) =>
       rules.filter((rule) => {
         const parsed = parseTrafficRule(rule)
-        return !parsed || !next || parsed.domain !== next.domain
+        return (
+          !parsed ||
+          !next ||
+          !(parsed.type === next.type && parsed.value === next.value)
+        )
       })
 
-    if (Array.isArray(data.prepend)) {
-      data.prepend = removeSameDomain(data.prepend)
+    if (Array.isArray(data['append-rules'])) {
+      data['append-rules'] = removeSameTarget(data['append-rules'] as unknown[])
     }
+    const prepend = Array.isArray(data['prepend-rules'])
+      ? (data['prepend-rules'] as unknown[])
+      : []
+    // 放在最前，优先级高于订阅自带规则
+    data['prepend-rules'] = [nextRule, ...removeSameTarget(prepend)]
 
-    const append = Array.isArray(data.append) ? data.append : []
-    const withoutSameDomain = removeSameDomain(append)
-
-    data.append = [...withoutSameDomain, nextAppendRule]
     await saveProfileFile(rulesProfileUid, yaml.dump(data, { lineWidth: -1 }))
+    await enhanceProfiles()
   }
 
   const addTrafficRule = useLockFn(async () => {
-    const domain = normalizeRuleDomain(trafficRuleInput)
+    const isDomainType =
+      TRAFFIC_RULE_TYPES.find((t) => t.name === trafficRuleType)?.domain ?? true
+    const value = isDomainType
+      ? normalizeRuleDomain(trafficRuleInput)
+      : trafficRuleInput.trim()
     const policy = trafficRulePolicy || selectedNode || primaryGroup?.name || ''
 
-    if (!domain) {
-      setStatus('请输入要分流的网址或域名')
+    if (!value) {
+      setStatus('请输入规则内容')
       return
     }
     if (!policy) {
-      setStatus('请选择这个网址要走的节点')
+      setStatus('请选择要走的节点')
       return
     }
 
     setBusy(true)
     try {
-      await saveTrafficRuleAppend(`DOMAIN-SUFFIX,${domain},${policy}`)
+      await saveTrafficRuleAppend(`${trafficRuleType},${value},${policy}`)
       setTrafficRuleInput('')
       setTrafficRulePolicy(policy)
       await loadTrafficRules()
       await refreshAll()
-      setStatus(`已添加规则：${domain} 走 ${policy}`)
+      setStatus(`已添加规则：${trafficRuleType} ${value} 走 ${policy}`)
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error))
     } finally {
@@ -1098,15 +1126,18 @@ const HomePage = () => {
     try {
       const content = await readProfileFile(rulesProfileUid)
       const data = (yaml.load(content) as Record<string, unknown> | null) || {}
-      for (const key of ['prepend', 'append']) {
+      for (const key of ['prepend-rules', 'append-rules']) {
         if (Array.isArray(data[key])) {
-          data[key] = data[key].filter((rule) => rule !== target.raw)
+          data[key] = (data[key] as unknown[]).filter(
+            (rule) => rule !== target.raw,
+          )
         }
       }
       await saveProfileFile(rulesProfileUid, yaml.dump(data, { lineWidth: -1 }))
+      await enhanceProfiles()
       await loadTrafficRules()
       await refreshAll()
-      setStatus(`已删除规则：${target.domain}`)
+      setStatus(`已删除规则：${target.value}`)
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error))
     } finally {
@@ -1852,16 +1883,34 @@ const HomePage = () => {
             <DialogContent sx={{ pt: 1.5 }}>
               <Stack spacing={1.25}>
                 <Typography sx={{ fontSize: 13, color: 'rgba(36,46,66,.66)' }}>
-                  输入网址或域名，选择要走的节点。比如 google.com
-                  走日本节点，baidu.com 走 DIRECT。
+                  选择匹配类型、填写内容、选择要走的节点。例如「域名后缀
+                  google.com 走日本节点」「IP 段 1.1.1.1/24 走 DIRECT」。
                 </Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                  <FormControl size="small" sx={{ minWidth: 124 }}>
+                    <InputLabel>类型</InputLabel>
+                    <Select
+                      sx={fieldSx}
+                      label="类型"
+                      value={trafficRuleType}
+                      disabled={busy}
+                      onChange={(event) =>
+                        setTrafficRuleType(event.target.value)
+                      }
+                    >
+                      {TRAFFIC_RULE_TYPES.map((t) => (
+                        <MenuItem key={t.name} value={t.name}>
+                          {t.label}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
                   <TextField
                     fullWidth
                     size="small"
                     sx={fieldSx}
-                    label="网址或域名"
-                    placeholder="例如 google.com 或 https://google.com"
+                    label="规则内容"
+                    placeholder="如 google.com / 1.1.1.1/24 / youtube"
                     value={trafficRuleInput}
                     disabled={busy}
                     onChange={(event) =>
@@ -1921,7 +1970,7 @@ const HomePage = () => {
                   ) : (
                     trafficRules.map((rule) => (
                       <Paper
-                        key={`${rule.domain}-${rule.policy}-${rule.raw}`}
+                        key={rule.raw}
                         elevation={0}
                         sx={{
                           p: 1,
@@ -1937,7 +1986,7 @@ const HomePage = () => {
                         >
                           <Box sx={{ flex: 1, minWidth: 0 }}>
                             <Typography sx={{ fontWeight: 850 }}>
-                              {rule.domain}
+                              {rule.value}
                             </Typography>
                             <Typography
                               sx={{
@@ -1948,7 +1997,9 @@ const HomePage = () => {
                                 whiteSpace: 'nowrap',
                               }}
                             >
-                              走 {rule.policy}
+                              {TRAFFIC_RULE_TYPES.find((t) => t.name === rule.type)
+                                ?.label ?? rule.type}{' '}
+                              · 走 {rule.policy}
                             </Typography>
                           </Box>
                           <IconButton
