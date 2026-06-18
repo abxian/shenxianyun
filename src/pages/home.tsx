@@ -385,13 +385,37 @@ const HomePage = () => {
     useState<DesktopVersionResponse | null>(null)
   const [busy, setBusy] = useState(false)
   const [updating, setUpdating] = useState(false)
+  const [updPercent, setUpdPercent] = useState(0)
   const { updateInfo } = useUpdate(true)
+  const isMacOS = getSystem() === 'macos'
   const doUpdate = useLockFn(async () => {
     if (!updateInfo?.available || updating) return
+    // macOS 没有 Apple 开发者签名/公证，就地自动更新不可靠（会被 Gatekeeper 拦）。
+    // 改为打开 Releases 页让用户手动下载安装。
+    if (isMacOS) {
+      await openWebUrl(
+        'https://github.com/abxian/shenxianyun/releases/latest',
+      ).catch(() => undefined)
+      return
+    }
     setUpdating(true)
+    setUpdPercent(0)
     setStatus('正在下载更新...')
+    let total = 0
+    let downloaded = 0
     try {
-      await updateInfo.downloadAndInstall()
+      await updateInfo.downloadAndInstall((event: { event: string; data?: { contentLength?: number; chunkLength?: number } }) => {
+        if (event.event === 'Started') {
+          total = event.data?.contentLength ?? 0
+        } else if (event.event === 'Progress') {
+          downloaded += event.data?.chunkLength ?? 0
+          if (total > 0) {
+            setUpdPercent(Math.min(99, Math.round((downloaded / total) * 100)))
+          }
+        } else if (event.event === 'Finished') {
+          setUpdPercent(100)
+        }
+      })
       setStatus('更新完成，正在重启...')
       await relaunch()
     } catch (error) {
@@ -1199,7 +1223,9 @@ const HomePage = () => {
                 <Typography
                   sx={{ fontSize: 12, color: 'rgba(214,240,250,.82)' }}
                 >
-                  点击「立即更新」自动下载并安装，完成后自动重启。
+                  {isMacOS
+                    ? '点击前往下载页，手动下载安装新版本。'
+                    : '点击「立即更新」自动下载并安装，完成后自动重启。'}
                 </Typography>
               </Box>
               <Button
@@ -1212,7 +1238,11 @@ const HomePage = () => {
                   '&:hover': { bgcolor: '#22b489' },
                 }}
               >
-                {updating ? '更新中…' : '立即更新'}
+                {isMacOS
+                  ? '前往下载'
+                  : updating
+                    ? `更新中 ${updPercent}%`
+                    : '立即更新'}
               </Button>
             </Box>
           )}
