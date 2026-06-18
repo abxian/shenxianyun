@@ -657,10 +657,11 @@ const HomePage = () => {
           await deleteProfile(current.uid).catch(() => {})
         }
 
+        // 不开启 clash verge 的周期性自动更新（那会无视内容是否变化、定时重下整个配置，浪费带宽）。
+        // 改为只靠后端 update_version 推送：仅当 /api/update-state 的版本号变大时才重新拉取订阅。
         await importProfile(data.subscription_url, {
           with_proxy: true,
-          allow_auto_update: true,
-          update_interval: 360,
+          allow_auto_update: false,
         })
 
         const latestProfiles = await getProfiles()
