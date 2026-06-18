@@ -77,7 +77,7 @@ const CODE_EXPIRES_STORAGE_KEY = 'shenxianyun.accessExpiresAt'
 const CODE_UPDATE_VERSION_STORAGE_KEY = 'shenxianyun.updateVersion'
 const CLIENT_ID_STORAGE_KEY = 'shenxianyun.clientId'
 const DELAY_TIMEOUT = 5000
-const TRAFFIC_REPORT_INTERVAL_MS = 30_000
+const TRAFFIC_REPORT_INTERVAL_MS = 300_000
 const MAX_TRAFFIC_REPORT_DELTA = 5 * 1024 * 1024 * 1024
 const DESKTOP_VERSION = '2.4.9'
 const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.4.9'
@@ -660,7 +660,7 @@ const HomePage = () => {
         await importProfile(data.subscription_url, {
           with_proxy: true,
           allow_auto_update: true,
-          update_interval: 60,
+          update_interval: 360,
         })
 
         const latestProfiles = await getProfiles()
@@ -747,7 +747,7 @@ const HomePage = () => {
     sendClientPresence(true).catch(() => undefined)
     const timer = window.setInterval(() => {
       sendClientPresence(true).catch(() => undefined)
-    }, 30_000)
+    }, 300_000)
     return () => {
       window.clearInterval(timer)
       sendClientPresence(false).catch(() => undefined)
@@ -828,7 +828,7 @@ const HomePage = () => {
     checkUpdate().catch(() => {})
     const timer = window.setInterval(() => {
       checkUpdate().catch(() => {})
-    }, 60_000)
+    }, 600_000)
 
     return () => window.clearInterval(timer)
   }, [
