@@ -39,6 +39,7 @@ import {
 import { invoke } from '@tauri-apps/api/core'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 import { relaunch } from '@tauri-apps/plugin-process'
+import { getVersion } from 'tauri-plugin-mihomo-api'
 import { useLockFn } from 'ahooks'
 import yaml from 'js-yaml'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -69,6 +70,7 @@ import {
   deleteProfile,
   updateProfile,
 } from '@/services/cmds'
+import { getIpInfo } from '@/services/api'
 import delayManager from '@/services/delay'
 import getSystem from '@/utils/get-system'
 
@@ -194,6 +196,14 @@ const TRAFFIC_RULE_TYPES = [
   { name: 'GEOIP', label: '地区 IP', domain: false },
   { name: 'PROCESS-NAME', label: '进程名', domain: false },
 ] as const
+
+type SelfCheckStatus = 'pending' | 'ok' | 'warn' | 'fail'
+type SelfCheckItem = {
+  key: string
+  label: string
+  status: SelfCheckStatus
+  detail: string
+}
 
 class AccessCodeStateError extends Error {
   constructor(
@@ -395,6 +405,9 @@ const HomePage = () => {
   const [trafficRuleType, setTrafficRuleType] = useState('DOMAIN-SUFFIX')
   const [trafficRulePolicy, setTrafficRulePolicy] = useState('')
   const [trafficRules, setTrafficRules] = useState<TrafficRuleItem[]>([])
+  const [selfCheckOpen, setSelfCheckOpen] = useState(false)
+  const [selfChecking, setSelfChecking] = useState(false)
+  const [selfCheckItems, setSelfCheckItems] = useState<SelfCheckItem[]>([])
   const [desktopUpdate, setDesktopUpdate] =
     useState<DesktopVersionResponse | null>(null)
   const [busy, setBusy] = useState(false)
@@ -1030,6 +1043,76 @@ const HomePage = () => {
     } finally {
       setDelayTesting(false)
     }
+  })
+
+  const runSelfCheck = useLockFn(async () => {
+    setSelfChecking(true)
+    const steps: SelfCheckItem[] = [
+      { key: 'core', label: '内核', status: 'pending', detail: '检测中…' },
+      { key: 'sysproxy', label: '系统代理', status: 'pending', detail: '检测中…' },
+      { key: 'tun', label: 'TUN 网卡', status: 'pending', detail: '检测中…' },
+      { key: 'sub', label: '订阅 / 提取码', status: 'pending', detail: '检测中…' },
+      { key: 'node', label: '节点连通', status: 'pending', detail: '检测中…' },
+      { key: 'internet', label: '上网检测', status: 'pending', detail: '检测中…' },
+    ]
+    setSelfCheckItems(steps.map((s) => ({ ...s })))
+    const set = (key: string, status: SelfCheckStatus, detail: string) =>
+      setSelfCheckItems((prev) =>
+        prev.map((item) =>
+          item.key === key ? { ...item, status, detail } : item,
+        ),
+      )
+
+    try {
+      const v = await getVersion()
+      set('core', 'ok', `运行中${v?.version ? ` v${v.version}` : ''}`)
+    } catch {
+      set('core', 'fail', '未运行，请尝试重启内核')
+    }
+
+    if (systemProxyOn) set('sysproxy', 'ok', '已开启')
+    else if (tunOn) set('sysproxy', 'ok', '未开启（已由 TUN 接管流量）')
+    else set('sysproxy', 'warn', '未开启')
+
+    set(
+      'tun',
+      tunOn ? 'ok' : 'warn',
+      tunOn ? '已开启' : isTunModeAvailable ? '已安装，未开启' : '未安装',
+    )
+
+    if (!savedCode) set('sub', 'fail', '未导入提取码')
+    else if (codeExpired) set('sub', 'fail', '提取码已过期')
+    else set('sub', 'ok', expiresAt ? `已绑定，到期 ${expiresAt}` : '已绑定')
+
+    if (!selectedNode || !primaryGroup) {
+      set('node', 'warn', '暂无可用节点')
+    } else {
+      try {
+        await delayManager.checkDelay(selectedNode, primaryGroup.name, 5000)
+        const delay = delayManager.getDelay(selectedNode, primaryGroup.name)
+        if (delay > 0 && delay < 5000) {
+          set('node', 'ok', `${selectedNode} · ${delay}ms`)
+        } else {
+          set('node', 'fail', `${selectedNode} · 超时不通`)
+        }
+      } catch {
+        set('node', 'fail', '测试失败')
+      }
+    }
+
+    try {
+      const info = await getIpInfo()
+      const where = [info.country, info.city].filter(Boolean).join(' ')
+      set(
+        'internet',
+        'ok',
+        `正常 · 出口 ${info.ip}${where ? ` (${where})` : ''}`,
+      )
+    } catch {
+      set('internet', 'fail', '无法访问外网')
+    }
+
+    setSelfChecking(false)
   })
 
   const loadTrafficRules = useCallback(async () => {
@@ -1703,6 +1786,47 @@ const HomePage = () => {
                   sx={{
                     p: 1.25,
                     borderRadius: '14px',
+                    border: '1px solid rgba(28,141,255,.28)',
+                    bgcolor: 'rgba(28,141,255,.06)',
+                  }}
+                >
+                  <Stack
+                    direction="row"
+                    spacing={1.1}
+                    sx={{ alignItems: 'center' }}
+                  >
+                    <BoltRounded sx={{ color: '#1c8dff' }} />
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography sx={{ fontWeight: 850 }}>一键自检</Typography>
+                      <Typography
+                        sx={{ fontSize: 12, color: 'rgba(36,46,66,.62)' }}
+                      >
+                        检查内核、系统代理、TUN、节点连通和上网状态。
+                      </Typography>
+                    </Box>
+                    <Button
+                      size="small"
+                      variant="contained"
+                      disabled={busy}
+                      onClick={() => {
+                        setSelfCheckOpen(true)
+                        runSelfCheck()
+                      }}
+                      sx={{
+                        bgcolor: '#1c8dff',
+                        fontWeight: 800,
+                        '&:hover': { bgcolor: '#167ce3' },
+                      }}
+                    >
+                      开始自检
+                    </Button>
+                  </Stack>
+                </Paper>
+                <Paper
+                  elevation={0}
+                  sx={{
+                    p: 1.25,
+                    borderRadius: '14px',
                     border: '1px solid rgba(45,65,105,.12)',
                     bgcolor: 'rgba(255,255,255,.72)',
                   }}
@@ -2018,6 +2142,113 @@ const HomePage = () => {
             </DialogContent>
             <DialogActions sx={{ px: 3, pb: 2.5 }}>
               <Button onClick={() => setTrafficRuleOpen(false)}>完成</Button>
+            </DialogActions>
+          </Dialog>
+          <Dialog
+            open={selfCheckOpen}
+            onClose={() => setSelfCheckOpen(false)}
+            fullWidth
+            maxWidth="xs"
+            slotProps={{
+              paper: {
+                sx: {
+                  borderRadius: '20px',
+                  border: '1px solid rgba(70,100,145,.16)',
+                  background:
+                    'linear-gradient(145deg, rgba(255,255,255,.98), rgba(244,249,255,.96))',
+                },
+              },
+            }}
+          >
+            <DialogTitle sx={{ fontWeight: 900, pb: 0.5 }}>系统自检</DialogTitle>
+            <DialogContent sx={{ pt: 1.5 }}>
+              <Stack spacing={1}>
+                {selfCheckItems.length === 0 ? (
+                  <Alert severity="info" sx={{ py: 0.35 }}>
+                    点击「重新检测」开始。
+                  </Alert>
+                ) : (
+                  selfCheckItems.map((item) => {
+                    const color =
+                      item.status === 'ok'
+                        ? '#18a679'
+                        : item.status === 'warn'
+                          ? '#e0a200'
+                          : item.status === 'fail'
+                            ? '#e5484d'
+                            : 'rgba(36,46,66,.45)'
+                    const mark =
+                      item.status === 'ok'
+                        ? '✓'
+                        : item.status === 'warn'
+                          ? '!'
+                          : item.status === 'fail'
+                            ? '✕'
+                            : '…'
+                    return (
+                      <Paper
+                        key={item.key}
+                        elevation={0}
+                        sx={{
+                          p: 1,
+                          borderRadius: '12px',
+                          border: '1px solid rgba(45,65,105,.12)',
+                          bgcolor: 'rgba(255,255,255,.78)',
+                        }}
+                      >
+                        <Stack
+                          direction="row"
+                          spacing={1.2}
+                          sx={{ alignItems: 'center' }}
+                        >
+                          <Box
+                            sx={{
+                              width: 22,
+                              height: 22,
+                              borderRadius: '50%',
+                              flexShrink: 0,
+                              display: 'grid',
+                              placeItems: 'center',
+                              color: '#fff',
+                              fontWeight: 900,
+                              fontSize: 13,
+                              bgcolor: color,
+                            }}
+                          >
+                            {mark}
+                          </Box>
+                          <Box sx={{ flex: 1, minWidth: 0 }}>
+                            <Typography sx={{ fontWeight: 800 }}>
+                              {item.label}
+                            </Typography>
+                            <Typography
+                              sx={{
+                                fontSize: 12,
+                                color: 'rgba(36,46,66,.66)',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {item.detail}
+                            </Typography>
+                          </Box>
+                        </Stack>
+                      </Paper>
+                    )
+                  })
+                )}
+              </Stack>
+            </DialogContent>
+            <DialogActions sx={{ px: 3, pb: 2.5 }}>
+              <Button
+                onClick={runSelfCheck}
+                disabled={selfChecking}
+                startIcon={<SpeedRounded />}
+              >
+                {selfChecking ? '检测中…' : '重新检测'}
+              </Button>
+              <Button onClick={() => setSelfCheckOpen(false)}>关闭</Button>
             </DialogActions>
           </Dialog>
           <Dialog
