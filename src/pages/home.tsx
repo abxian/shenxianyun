@@ -422,7 +422,13 @@ const HomePage = () => {
     toggleSystemProxy,
     invalidateProxyState,
   } = useSystemProxyState()
-  const { isTunModeAvailable, mutateSystemState } = useSystemState()
+  const {
+    isTunModeAvailable,
+    isServiceOk,
+    isAdminMode,
+    runningMode,
+    mutateSystemState,
+  } = useSystemState()
   const { changeProxy } = useProxySelection({
     onSuccess: () => {
       setStatus('节点已切换')
@@ -1092,6 +1098,8 @@ const HomePage = () => {
     setSelfChecking(true)
     const steps: SelfCheckItem[] = [
       { key: 'core', label: '内核', status: 'pending', detail: '检测中…' },
+      { key: 'mode', label: '运行模式', status: 'pending', detail: '检测中…' },
+      { key: 'service', label: '系统服务', status: 'pending', detail: '检测中…' },
       { key: 'sysproxy', label: '系统代理', status: 'pending', detail: '检测中…' },
       { key: 'tun', label: 'TUN 网卡', status: 'pending', detail: '检测中…' },
       { key: 'sub', label: '订阅 / 提取码', status: 'pending', detail: '检测中…' },
@@ -1113,15 +1121,43 @@ const HomePage = () => {
       set('core', 'fail', '未运行，请尝试重启内核')
     }
 
+    set(
+      'mode',
+      runningMode === 'Service' || isAdminMode ? 'ok' : 'warn',
+      runningMode === 'Service'
+        ? 'Service 服务模式（TUN 可用）'
+        : isAdminMode
+          ? 'Sidecar · 管理员（TUN 可用）'
+          : 'Sidecar 普通模式（TUN 不可用，需装服务或以管理员运行）',
+    )
+    set(
+      'service',
+      isServiceOk ? 'ok' : 'warn',
+      isServiceOk
+        ? '已安装'
+        : '未安装（TUN 需要它，请在主页点「安装 TUN」并允许 UAC）',
+    )
+
     if (systemProxyOn) set('sysproxy', 'ok', '已开启')
     else if (tunOn) set('sysproxy', 'ok', '未开启（已由 TUN 接管流量）')
     else set('sysproxy', 'warn', '未开启')
 
-    set(
-      'tun',
-      tunOn ? 'ok' : 'warn',
-      tunOn ? '已开启' : isTunModeAvailable ? '已安装，未开启' : '未安装',
+    const tunReallyOn = Boolean(
+      (clashConfig as { tun?: { enable?: boolean } } | undefined)?.tun?.enable,
     )
+    if (tunOn && !isTunModeAvailable) {
+      set('tun', 'fail', '开关已开，但服务未就绪/非管理员，TUN 不会生效')
+    } else if (tunOn && !tunReallyOn) {
+      set('tun', 'fail', '开关已开，但内核未实际启用 TUN，请重启内核或重开 TUN')
+    } else if (tunOn && tunReallyOn) {
+      set('tun', 'ok', '已开启并生效')
+    } else {
+      set(
+        'tun',
+        isTunModeAvailable ? 'ok' : 'warn',
+        isTunModeAvailable ? '未开启' : '未开启（系统服务未安装）',
+      )
+    }
 
     if (!savedCode) set('sub', 'fail', '未导入提取码')
     else if (codeExpired) set('sub', 'fail', '提取码已过期')
