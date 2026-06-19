@@ -205,6 +205,49 @@ type SelfCheckItem = {
   detail: string
 }
 
+// 抗污染默认 DNS（与官方 clash verge 默认一致）：fake-ip + 可信 DoH，
+// 解决「直连域名被 DNS 污染导致证书/打不开」的问题。单页版开启 DNS 覆写时写入。
+const DEFAULT_DNS_CONFIG = {
+  enable: true,
+  listen: ':53',
+  'enhanced-mode': 'fake-ip',
+  'fake-ip-range': '198.18.0.1/16',
+  'fake-ip-filter-mode': 'blacklist',
+  'prefer-h3': false,
+  'respect-rules': false,
+  'use-hosts': false,
+  'use-system-hosts': false,
+  ipv6: true,
+  'fake-ip-filter': [
+    '*.lan',
+    '*.local',
+    '*.arpa',
+    'time.*.com',
+    'ntp.*.com',
+    '+.market.xiaomi.com',
+    'localhost.ptlogin2.qq.com',
+    '*.msftncsi.com',
+    'www.msftconnecttest.com',
+  ],
+  'default-nameserver': ['system', '223.6.6.6', '8.8.8.8'],
+  nameserver: [
+    'https://doh.pub/dns-query',
+    'https://dns.alidns.com/dns-query',
+  ],
+  fallback: [],
+  'proxy-server-nameserver': [
+    'https://doh.pub/dns-query',
+    'https://dns.alidns.com/dns-query',
+    'tls://223.5.5.5',
+  ],
+  'fallback-filter': {
+    geoip: true,
+    'geoip-code': 'CN',
+    ipcidr: ['240.0.0.0/4', '0.0.0.0/32'],
+    domain: ['+.google.com', '+.facebook.com', '+.youtube.com'],
+  },
+}
+
 class AccessCodeStateError extends Error {
   constructor(
     message: string,
@@ -1249,10 +1292,19 @@ const HomePage = () => {
   const toggleDnsOverwrite = useLockFn(async (checked: boolean) => {
     setBusy(true)
     try {
+      if (checked) {
+        // 单页版没有 DNS 设置页，首次开启时写入一份抗污染默认 DNS（fake-ip + 可信 DoH）
+        const exists = await invoke<boolean>('check_dns_config_exists').catch(
+          () => false,
+        )
+        if (!exists) {
+          await invoke('save_dns_config', { dnsConfig: DEFAULT_DNS_CONFIG })
+        }
+      }
       await patchVerge({ enable_dns_settings: checked })
       await invoke('apply_dns_config', { apply: checked })
       await refreshClashConfig()
-      setStatus(checked ? 'DNS 覆写已开启' : 'DNS 覆写已关闭')
+      setStatus(checked ? 'DNS 覆写已开启（抗污染）' : 'DNS 覆写已关闭')
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error))
     } finally {
@@ -1924,8 +1976,8 @@ const HomePage = () => {
                 {[
                   {
                     icon: <DnsRounded sx={{ color: '#7c5cff' }} />,
-                    title: 'DNS 覆写',
-                    desc: '需要自定义 DNS 时再开启，默认保持关闭更稳。',
+                    title: 'DNS 覆写（抗污染）',
+                    desc: '遇到直连网址打不开/证书报错时开启：用 fake-ip + 可信加密 DNS，避免 DNS 污染。',
                     checked: dnsOverwriteOn,
                     onChange: toggleDnsOverwrite,
                   },
