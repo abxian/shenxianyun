@@ -70,7 +70,6 @@ import {
   deleteProfile,
   updateProfile,
 } from '@/services/cmds'
-import { getIpInfo } from '@/services/api'
 import delayManager from '@/services/delay'
 import getSystem from '@/utils/get-system'
 
@@ -203,6 +202,9 @@ type SelfCheckItem = {
   label: string
   status: SelfCheckStatus
   detail: string
+  fixLabel?: string
+  fix?: () => Promise<void>
+  fixing?: boolean
 }
 
 // 抗污染默认 DNS（与官方 clash verge 默认一致）：fake-ip + 可信 DoH，
@@ -1094,6 +1096,76 @@ const HomePage = () => {
     }
   })
 
+  // 核心混合端口（系统代理 / 经代理探测都走它）
+  const mixedPort =
+    Number(
+      (clashConfig as { 'mixed-port'?: number; port?: number } | undefined)?.[
+        'mixed-port'
+      ] ??
+        (clashConfig as { port?: number } | undefined)?.port,
+    ) || 7897
+  const proxyUrl = `http://127.0.0.1:${mixedPort}`
+
+  // 真实发起一次 HTTP 探测；viaProxy=true 时强制走核心混合端口，
+  // 等价于「浏览器开了代理后」的真实出网路径。
+  const probe = useCallback(
+    async (url: string, viaProxy: boolean, timeout = 6000) => {
+      const ctrl = new AbortController()
+      const t = setTimeout(() => ctrl.abort(), timeout)
+      try {
+        const res = await tauriFetch(url, {
+          method: 'GET',
+          signal: ctrl.signal,
+          ...(viaProxy ? { proxy: { all: proxyUrl } } : {}),
+        })
+        return res.status >= 200 && res.status < 400
+      } catch {
+        return false
+      } finally {
+        clearTimeout(t)
+      }
+    },
+    [proxyUrl],
+  )
+
+  // 取出口 IP / 国家；viaProxy=true 反映节点出口，false 反映本地直连出口。
+  const fetchEgress = useCallback(
+    async (viaProxy: boolean, ipv6 = false) => {
+      const endpoints = ipv6
+        ? ['https://api6.ipify.org?format=json', 'https://6.ipw.cn/api/ip/myip?json']
+        : [
+            'https://api.ip.sb/geoip',
+            'https://ipapi.co/json',
+            'https://ipwho.is/',
+          ]
+      for (const url of endpoints) {
+        try {
+          const ctrl = new AbortController()
+          const t = setTimeout(() => ctrl.abort(), 6000)
+          const res = await tauriFetch(url, {
+            method: 'GET',
+            signal: ctrl.signal,
+            ...(viaProxy ? { proxy: { all: proxyUrl } } : {}),
+          })
+          clearTimeout(t)
+          if (!res.ok) continue
+          const d = (await res.json()) as Record<string, unknown>
+          const ip = String(d.ip ?? d.IP ?? '')
+          if (!ip) continue
+          return {
+            ip,
+            cc: String(d.country_code ?? d.country ?? '').toUpperCase(),
+            country: String(d.country ?? d.country_name ?? ''),
+          }
+        } catch {
+          // 试下一个
+        }
+      }
+      return null
+    },
+    [proxyUrl],
+  )
+
   const runSelfCheck = useLockFn(async () => {
     setSelfChecking(true)
     const steps: SelfCheckItem[] = [
@@ -1104,13 +1176,23 @@ const HomePage = () => {
       { key: 'tun', label: 'TUN 网卡', status: 'pending', detail: '检测中…' },
       { key: 'sub', label: '订阅 / 提取码', status: 'pending', detail: '检测中…' },
       { key: 'node', label: '节点连通', status: 'pending', detail: '检测中…' },
-      { key: 'internet', label: '上网检测', status: 'pending', detail: '检测中…' },
+      { key: 'lan', label: '内网 · 直连', status: 'pending', detail: '检测中…' },
+      { key: 'external', label: '外网 · 代理出口', status: 'pending', detail: '检测中…' },
+      { key: 'ipv6', label: 'IPv6 连通', status: 'pending', detail: '检测中…' },
     ]
     setSelfCheckItems(steps.map((s) => ({ ...s })))
-    const set = (key: string, status: SelfCheckStatus, detail: string) =>
+    const set = (
+      key: string,
+      status: SelfCheckStatus,
+      detail: string,
+      fix?: () => Promise<void>,
+      fixLabel?: string,
+    ) =>
       setSelfCheckItems((prev) =>
         prev.map((item) =>
-          item.key === key ? { ...item, status, detail } : item,
+          item.key === key
+            ? { ...item, status, detail, fix, fixLabel, fixing: false }
+            : item,
         ),
       )
 
@@ -1118,7 +1200,15 @@ const HomePage = () => {
       const v = await getVersion()
       set('core', 'ok', `运行中${v?.version ? ` v${v.version}` : ''}`)
     } catch {
-      set('core', 'fail', '未运行，请尝试重启内核')
+      set(
+        'core',
+        'fail',
+        '未运行',
+        async () => {
+          await restartCore()
+        },
+        '重启内核',
+      )
     }
 
     set(
@@ -1129,26 +1219,78 @@ const HomePage = () => {
         : isAdminMode
           ? 'Sidecar · 管理员（TUN 可用）'
           : 'Sidecar 普通模式（TUN 不可用，需装服务或以管理员运行）',
+      runningMode === 'Service' || isAdminMode
+        ? undefined
+        : async () => {
+            await installService()
+            await restartCore()
+          },
+      runningMode === 'Service' || isAdminMode ? undefined : '安装服务',
     )
     set(
       'service',
       isServiceOk ? 'ok' : 'warn',
+      isServiceOk ? '已安装' : '未安装（TUN 需要它）',
       isServiceOk
-        ? '已安装'
-        : '未安装（TUN 需要它，请在主页点「安装 TUN」并允许 UAC）',
+        ? undefined
+        : async () => {
+            await installService()
+            await restartCore()
+          },
+      isServiceOk ? undefined : '安装服务',
     )
 
-    if (systemProxyOn) set('sysproxy', 'ok', '已开启')
-    else if (tunOn) set('sysproxy', 'ok', '未开启（已由 TUN 接管流量）')
-    else set('sysproxy', 'warn', '未开启')
+    if (systemProxyConfigOn && !systemProxyOn) {
+      set(
+        'sysproxy',
+        'fail',
+        '已配置但未生效（浏览器走不了代理）',
+        async () => {
+          await toggleSystemProxy(false).catch(() => {})
+          await toggleSystemProxy(true)
+        },
+        '重设系统代理',
+      )
+    } else if (systemProxyOn) {
+      set('sysproxy', 'ok', `已开启 · 端口 ${mixedPort}`)
+    } else if (tunOn) {
+      set('sysproxy', 'ok', '未开启（已由 TUN 接管流量）')
+    } else {
+      set(
+        'sysproxy',
+        'warn',
+        '未开启',
+        async () => {
+          await toggleSystemProxy(true)
+        },
+        '开启',
+      )
+    }
 
     const tunReallyOn = Boolean(
       (clashConfig as { tun?: { enable?: boolean } } | undefined)?.tun?.enable,
     )
     if (tunOn && !isTunModeAvailable) {
-      set('tun', 'fail', '开关已开，但服务未就绪/非管理员，TUN 不会生效')
+      set(
+        'tun',
+        'fail',
+        '开关已开，但服务未就绪/非管理员，TUN 不会生效',
+        async () => {
+          await installService()
+          await restartCore()
+        },
+        '安装服务',
+      )
     } else if (tunOn && !tunReallyOn) {
-      set('tun', 'fail', '开关已开，但内核未实际启用 TUN，请重启内核或重开 TUN')
+      set(
+        'tun',
+        'fail',
+        '开关已开，但内核未实际启用 TUN',
+        async () => {
+          await restartCore()
+        },
+        '重启内核',
+      )
     } else if (tunOn && tunReallyOn) {
       set('tun', 'ok', '已开启并生效')
     } else {
@@ -1172,26 +1314,112 @@ const HomePage = () => {
         if (delay > 0 && delay < 5000) {
           set('node', 'ok', `${selectedNode} · ${delay}ms`)
         } else {
-          set('node', 'fail', `${selectedNode} · 超时不通`)
+          set(
+            'node',
+            'fail',
+            `${selectedNode} · 超时不通`,
+            async () => {
+              await enhanceProfiles()
+              await refreshProxy().catch(() => {})
+            },
+            '重载配置',
+          )
         }
       } catch {
-        set('node', 'fail', '测试失败')
+        set(
+          'node',
+          'fail',
+          '测试失败',
+          async () => {
+            await enhanceProfiles()
+            await refreshProxy().catch(() => {})
+          },
+          '重载配置',
+        )
       }
     }
 
-    try {
-      const info = await getIpInfo()
-      const where = [info.country, info.city].filter(Boolean).join(' ')
+    // 内网 · 直连：能不能打开国内站点（本地网络 + 直连规则 + DNS）
+    const lanOk = await probe('https://www.baidu.com', false)
+    if (lanOk) {
+      set('lan', 'ok', '本地网络正常（国内直连可用）')
+    } else {
       set(
-        'internet',
-        'ok',
-        `正常 · 出口 ${info.ip}${where ? ` (${where})` : ''}`,
+        'lan',
+        'fail',
+        '直连都打不开，本地网络/DNS 异常',
+        async () => {
+          await restartCore()
+        },
+        '重启内核',
       )
-    } catch {
-      set('internet', 'fail', '无法访问外网')
+    }
+
+    // 外网 · 代理出口：强制走核心混合端口，看真实出口 IP/国家
+    const egress = await fetchEgress(true)
+    if (!egress) {
+      const g = await probe('https://www.gstatic.com/generate_204', true)
+      if (g) {
+        set(
+          'external',
+          'warn',
+          '外网通，但取不到出口信息（IP 查询站被限）',
+        )
+      } else {
+        set(
+          'external',
+          'fail',
+          '经代理无法访问外网（核心 / 节点 / DNS 异常）',
+          async () => {
+            await restartCore()
+            await refreshClashConfig?.().catch(() => {})
+          },
+          '重启内核',
+        )
+      }
+    } else if (egress.cc === 'CN') {
+      set(
+        'external',
+        'warn',
+        `出口在国内 ${egress.ip}（节点未出国 / 选了国内中转）`,
+      )
+    } else {
+      set(
+        'external',
+        'ok',
+        `出口 ${egress.ip}${egress.country ? ` (${egress.country})` : ''}`,
+      )
+    }
+
+    // IPv6：经代理探测 v6 出口，多数情况下不通也不影响上网
+    const egress6 = await fetchEgress(true, true)
+    if (egress6) {
+      set('ipv6', 'ok', `IPv6 出口 ${egress6.ip}`)
+    } else {
+      set('ipv6', 'warn', 'IPv6 不通（多数情况不影响上网）')
     }
 
     setSelfChecking(false)
+  })
+
+  const runSelfCheckFix = useLockFn(async (item: SelfCheckItem) => {
+    if (!item.fix) return
+    setSelfCheckItems((prev) =>
+      prev.map((it) =>
+        it.key === item.key ? { ...it, fixing: true, detail: '修复中…' } : it,
+      ),
+    )
+    try {
+      await item.fix()
+    } catch {
+      // 失败也继续，重新自检会反映真实状态
+    }
+    await Promise.allSettled([
+      mutateSystemState?.(),
+      refreshClashConfig?.(),
+      invalidateProxyState?.(),
+    ])
+    await runSelfCheck()
   })
 
   const loadTrafficRules = useCallback(async () => {
@@ -2321,6 +2549,25 @@ const HomePage = () => {
                               {item.detail}
                             </Typography>
                           </Box>
+                          {item.fix &&
+                            (item.status === 'fail' ||
+                              item.status === 'warn') && (
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                disabled={item.fixing || selfChecking}
+                                onClick={() => runSelfCheckFix(item)}
+                                sx={{
+                                  flexShrink: 0,
+                                  minWidth: 0,
+                                  px: 1.2,
+                                  borderRadius: '9px',
+                                  fontWeight: 800,
+                                }}
+                              >
+                                {item.fixing ? '修复中…' : item.fixLabel || '修复'}
+                              </Button>
+                            )}
                         </Stack>
                       </Paper>
                     )
