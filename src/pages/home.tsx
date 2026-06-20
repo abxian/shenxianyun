@@ -221,7 +221,12 @@ const DEFAULT_DNS_CONFIG = {
   'use-hosts': false,
   'use-system-hosts': false,
   ipv6: true,
+  // blacklist 模式：命中者「不」走 fake-ip，拿真实 IP。
+  // 关键：geosite:cn 让所有国内域名拿真实 IP，否则系统代理下国内直连域名
+  // 会被解析成无效 fake-ip(198.18.x.x) 而打不开。
   'fake-ip-filter': [
+    'geosite:cn',
+    'geosite:private',
     '*.lan',
     '*.local',
     '*.arpa',
@@ -1178,9 +1183,11 @@ const HomePage = () => {
       { key: 'sysproxy', label: '系统代理', status: 'pending', detail: '检测中…' },
       { key: 'tun', label: 'TUN 网卡', status: 'pending', detail: '检测中…' },
       { key: 'sub', label: '订阅 / 提取码', status: 'pending', detail: '检测中…' },
+      { key: 'proxymode', label: '代理模式', status: 'pending', detail: '检测中…' },
       { key: 'node', label: '节点连通', status: 'pending', detail: '检测中…' },
-      { key: 'lan', label: '内网 · 直连', status: 'pending', detail: '检测中…' },
-      { key: 'external', label: '外网 · 代理出口', status: 'pending', detail: '检测中…' },
+      { key: 'lan', label: '本地网络', status: 'pending', detail: '检测中…' },
+      { key: 'domestic', label: '国内站点', status: 'pending', detail: '检测中…' },
+      { key: 'external', label: '国外站点', status: 'pending', detail: '检测中…' },
       { key: 'ipv6', label: 'IPv6 连通', status: 'pending', detail: '检测中…' },
     ]
     setSelfCheckItems(steps.map((s) => ({ ...s })))
@@ -1270,32 +1277,34 @@ const HomePage = () => {
       )
     }
 
-    const tunReallyOn = Boolean(
-      (clashConfig as { tun?: { enable?: boolean } } | undefined)?.tun?.enable,
-    )
-    if (tunOn && !isTunModeAvailable) {
-      set(
-        'tun',
-        'fail',
-        '开关已开，但服务未就绪/非管理员，TUN 不会生效',
-        async () => {
-          await installService()
-          await restartCore()
-        },
-        '安装服务',
-      )
-    } else if (tunOn && !tunReallyOn) {
-      set(
-        'tun',
-        'fail',
-        '开关已开，但内核未实际启用 TUN',
-        async () => {
-          await restartCore()
-        },
-        '重启内核',
-      )
-    } else if (tunOn && tunReallyOn) {
-      set('tun', 'ok', '已开启并生效')
+    if (tunOn) {
+      // flag(clashConfig.tun.enable) 运行时读不准，改用实测：
+      // 不走代理直连国外 204，能通说明 TUN 确实在接管并出网。
+      const tunWorks = await probe('https://www.gstatic.com/generate_204', false)
+      if (tunWorks) {
+        set('tun', 'ok', '已开启并生效（实测可出网）')
+      } else if (!isTunModeAvailable) {
+        set(
+          'tun',
+          'fail',
+          '开关已开，但服务未就绪/非管理员，TUN 未生效',
+          async () => {
+            await installService()
+            await restartCore()
+          },
+          '安装服务',
+        )
+      } else {
+        set(
+          'tun',
+          'fail',
+          '开关已开但实测不通，请重启内核',
+          async () => {
+            await restartCore()
+          },
+          '重启内核',
+        )
+      }
     } else {
       set(
         'tun',
@@ -1307,6 +1316,35 @@ const HomePage = () => {
     if (!savedCode) set('sub', 'fail', '未导入提取码')
     else if (codeExpired) set('sub', 'fail', '提取码已过期')
     else set('sub', 'ok', expiresAt ? `已绑定，到期 ${expiresAt}` : '已绑定')
+
+    const proxyMode = String(
+      (clashConfig as { mode?: string } | undefined)?.mode || '',
+    ).toLowerCase()
+    if (proxyMode === 'global') {
+      set(
+        'proxymode',
+        'warn',
+        '全局模式：国内站点也走国外节点，会打不开',
+        async () => {
+          await patchClashMode('rule')
+        },
+        '改规则模式',
+      )
+    } else if (proxyMode === 'direct') {
+      set(
+        'proxymode',
+        'warn',
+        '直连模式：完全不走代理，国外打不开',
+        async () => {
+          await patchClashMode('rule')
+        },
+        '改规则模式',
+      )
+    } else if (proxyMode === 'rule') {
+      set('proxymode', 'ok', '规则模式（国内直连、国外走代理）')
+    } else {
+      set('proxymode', proxyMode ? 'warn' : 'ok', proxyMode || '规则')
+    }
 
     if (!selectedNode || !primaryGroup) {
       set('node', 'warn', '暂无可用节点')
@@ -1342,15 +1380,23 @@ const HomePage = () => {
       }
     }
 
-    // 内网 · 直连：能不能打开国内站点（本地网络 + 直连规则 + DNS）
+    // 「修复网络」：关 DNS 覆写（fake-ip 会把国内域名解析坏）+ 模式回 rule + 重启内核
+    const fixNetwork = async () => {
+      await invoke('apply_dns_config', { apply: false }).catch(() => {})
+      await patchClashMode('rule').catch(() => {})
+      await restartCore()
+      await refreshClashConfig?.().catch(() => {})
+    }
+
+    // 本地网络：直连国内站点（不走代理），验证机器本身有网
     const lanOk = await probe('https://www.baidu.com', false)
     if (lanOk) {
-      set('lan', 'ok', '本地网络正常（国内直连可用）')
+      set('lan', 'ok', '正常（机器本身可上网）')
     } else {
       set(
         'lan',
         'fail',
-        '直连都打不开，本地网络/DNS 异常',
+        '直连都打不开，本地网络/系统 DNS 异常',
         async () => {
           await restartCore()
         },
@@ -1358,29 +1404,35 @@ const HomePage = () => {
       )
     }
 
-    // 外网 · 代理出口：强制走核心混合端口，看真实出口 IP/国家
+    // 国内站点：经核心混合端口访问国内站，等同浏览器开代理时的真实路径。
+    // 开了 DNS 覆写(fake-ip)时，国内直连域名会被解析成无效 fake-ip 而打不开。
+    const domesticOk = await probe('https://www.baidu.com', true)
+    if (domesticOk) {
+      set('domestic', 'ok', '经代理可访问国内站点')
+    } else {
+      set(
+        'domestic',
+        'fail',
+        dnsOverwriteOn
+          ? '国内站点打不开（DNS 覆写 fake-ip 把直连域名解析坏了）'
+          : '国内站点打不开（多为全局模式或规则问题）',
+        fixNetwork,
+        '修复网络',
+      )
+    }
+
+    // 国外站点：强制走核心混合端口，看真实出口 IP/国家
     const egress = await fetchEgress(true)
     if (!egress) {
       const g = await probe('https://www.gstatic.com/generate_204', true)
       if (g) {
-        set(
-          'external',
-          'warn',
-          '外网通，但取不到出口信息（IP 查询站被限）',
-        )
+        set('external', 'warn', '外网通，但取不到出口信息（IP 查询站被限）')
       } else {
         set(
           'external',
           'fail',
           '经代理无法访问外网（核心 / 节点 / DNS 异常）',
-          async () => {
-            // 节点通却出不去，最常见是 DNS 覆写坏了或模式不对：
-            // 关 DNS 覆写 + 模式回 rule + 重启内核
-            await invoke('apply_dns_config', { apply: false }).catch(() => {})
-            await patchClashMode('rule').catch(() => {})
-            await restartCore()
-            await refreshClashConfig?.().catch(() => {})
-          },
+          fixNetwork,
           '修复网络',
         )
       }
