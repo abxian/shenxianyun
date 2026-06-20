@@ -64,6 +64,7 @@ import {
   patchProfilesConfig,
   readProfileFile,
   restartCore,
+  restartApp,
   saveProfileFile,
   startCore,
   stopCore,
@@ -459,6 +460,8 @@ const HomePage = () => {
   const [selfCheckOpen, setSelfCheckOpen] = useState(false)
   const [selfChecking, setSelfChecking] = useState(false)
   const [selfCheckItems, setSelfCheckItems] = useState<SelfCheckItem[]>([])
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false)
+  const [resetting, setResetting] = useState(false)
   const [desktopUpdate, setDesktopUpdate] =
     useState<DesktopVersionResponse | null>(null)
   const [busy, setBusy] = useState(false)
@@ -1371,10 +1374,14 @@ const HomePage = () => {
           'fail',
           '经代理无法访问外网（核心 / 节点 / DNS 异常）',
           async () => {
+            // 节点通却出不去，最常见是 DNS 覆写坏了或模式不对：
+            // 关 DNS 覆写 + 模式回 rule + 重启内核
+            await invoke('apply_dns_config', { apply: false }).catch(() => {})
+            await patchClashMode('rule').catch(() => {})
             await restartCore()
             await refreshClashConfig?.().catch(() => {})
           },
-          '重启内核',
+          '修复网络',
         )
       }
     } else if (egress.cc === 'CN') {
@@ -1420,6 +1427,51 @@ const HomePage = () => {
       invalidateProxyState?.(),
     ])
     await runSelfCheck()
+  })
+
+  // 彻底重置：清空所有有问题的配置/订阅/本地数据，重启后等于全新安装。
+  // 仅用现有命令实现（不改 Rust）：关代理与 TUN → 关 DNS 覆写 → 模式回 rule
+  // → 删除全部订阅与规则配置 → 清空提取码等本地数据 → 重启应用重建干净配置。
+  const factoryReset = useLockFn(async () => {
+    setResetting(true)
+    try {
+      // 1) 先把系统代理 / TUN 关掉，避免把坏代理残留在系统里
+      await patchVerge({ enable_tun_mode: false }).catch(() => {})
+      await toggleSystemProxy(false).catch(() => {})
+      // 2) 关闭 DNS 覆写（解析异常的常见根因）
+      await invoke('apply_dns_config', { apply: false }).catch(() => {})
+      // 3) 运行模式回到 rule，避免卡在 direct/global
+      await patchClashMode('rule').catch(() => {})
+      // 4) 删除全部订阅与自定义规则（含全局 Merge 覆盖）
+      try {
+        const p = await getProfiles()
+        const items = p?.items ?? []
+        for (const it of items) {
+          const uid = (it as { uid?: string })?.uid
+          if (uid) await deleteProfile(uid).catch(() => {})
+        }
+        await patchProfilesConfig({ ...p, current: undefined, items: [] }).catch(
+          () => {},
+        )
+      } catch {
+        // 忽略，下面照样重启重建
+      }
+      // 5) 清空提取码等所有本地数据
+      try {
+        Object.keys(localStorage)
+          .filter((k) => k.startsWith('shenxianyun.'))
+          .forEach((k) => localStorage.removeItem(k))
+      } catch {
+        // 忽略
+      }
+      localStorage.removeItem(CODE_STORAGE_KEY)
+      localStorage.removeItem(CODE_EXPIRES_STORAGE_KEY)
+      // 6) 重启应用，生成全新干净配置（等于重装）
+      await restartApp()
+    } catch {
+      setResetting(false)
+      setStatus('重置失败，请重试或手动重装')
+    }
   })
 
   const loadTrafficRules = useCallback(async () => {
@@ -2577,6 +2629,14 @@ const HomePage = () => {
             </DialogContent>
             <DialogActions sx={{ px: 3, pb: 2.5 }}>
               <Button
+                color="error"
+                onClick={() => setResetConfirmOpen(true)}
+                disabled={selfChecking || resetting}
+                sx={{ mr: 'auto', fontWeight: 800 }}
+              >
+                彻底重置
+              </Button>
+              <Button
                 onClick={runSelfCheck}
                 disabled={selfChecking}
                 startIcon={<SpeedRounded />}
@@ -2584,6 +2644,57 @@ const HomePage = () => {
                 {selfChecking ? '检测中…' : '重新检测'}
               </Button>
               <Button onClick={() => setSelfCheckOpen(false)}>关闭</Button>
+            </DialogActions>
+          </Dialog>
+          <Dialog
+            open={resetConfirmOpen}
+            onClose={() => !resetting && setResetConfirmOpen(false)}
+            fullWidth
+            maxWidth="xs"
+            slotProps={{
+              paper: {
+                sx: {
+                  borderRadius: '20px',
+                  border: '1px solid rgba(229,72,77,.25)',
+                },
+              },
+            }}
+          >
+            <DialogTitle sx={{ fontWeight: 900, color: '#e5484d', pb: 0.5 }}>
+              彻底重置（清空所有数据）
+            </DialogTitle>
+            <DialogContent sx={{ pt: 1.5 }}>
+              <Alert severity="warning" sx={{ mb: 1.5 }}>
+                自动修复无效时使用。将清除所有有问题的配置，效果等于重新安装。
+              </Alert>
+              <Typography sx={{ fontSize: 13, color: 'rgba(36,46,66,.78)' }}>
+                会执行：
+                <br />· 关闭系统代理与 TUN
+                <br />· 关闭 DNS 覆写、运行模式回到 rule
+                <br />· 删除全部订阅与自定义规则
+                <br />· 清空提取码等全部本地数据
+                <br />· 重启应用，生成全新干净配置
+                <br />
+                <b>重启后需重新输入提取码并导入订阅。</b>
+              </Typography>
+            </DialogContent>
+            <DialogActions sx={{ px: 3, pb: 2.5 }}>
+              <Button
+                onClick={() => setResetConfirmOpen(false)}
+                disabled={resetting}
+              >
+                取消
+              </Button>
+              <Button
+                color="error"
+                variant="contained"
+                disableElevation
+                onClick={factoryReset}
+                disabled={resetting}
+                sx={{ fontWeight: 800 }}
+              >
+                {resetting ? '重置中…' : '确认重置并重启'}
+              </Button>
             </DialogActions>
           </Dialog>
           <Dialog
