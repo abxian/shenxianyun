@@ -18,3 +18,6 @@ CLAUDE.md
 .vfox/
 .claude
 AGENTS.md
+
+# tauri 子目录会生成的多余 lock（工作区只用根 Cargo.lock）
+src-tauri/Cargo.lock
