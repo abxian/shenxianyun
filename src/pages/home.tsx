@@ -1145,7 +1145,17 @@ const HomePage = () => {
   })
 
   // ===== 手动配置管理：应对 web 断网无法导入订阅时，自行导入/切换/编辑本地配置 =====
-  const profileList = profiles?.items || []
+  // 只展示用户真正的配置文件（远程订阅 / 本地配置），隐藏到期占位配置、全局 Merge
+  // 覆盖、脚本等「乱七八糟」的内部条目，避免误编辑/误切换。
+  const profileList = useMemo(() => {
+    const expiredUid = localStorage.getItem(EXPIRED_PROFILE_UID_KEY) || ''
+    return (profiles?.items || []).filter(
+      (item) =>
+        (item.type === 'remote' || item.type === 'local') &&
+        item.uid !== expiredUid &&
+        item.uid !== rulesProfileUid,
+    )
+  }, [profiles?.items])
 
   const manualImportByUrl = useLockFn(async () => {
     const url = manualImportUrl.trim()
