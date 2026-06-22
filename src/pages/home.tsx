@@ -55,6 +55,7 @@ import { useSystemState } from '@/hooks/use-system-state'
 import { useVerge } from '@/hooks/use-verge'
 import { useAppData } from '@/providers/app-data-context'
 import {
+  createProfile,
   enhanceProfiles,
   getProfiles,
   importProfile,
@@ -71,6 +72,7 @@ import {
   deleteProfile,
   updateProfile,
 } from '@/services/cmds'
+import { EditorViewer } from '@/components/profile/editor-viewer'
 import delayManager from '@/services/delay'
 import getSystem from '@/utils/get-system'
 
@@ -79,9 +81,39 @@ const CODE_STORAGE_KEY = 'shenxianyun.accessCode'
 const CODE_EXPIRES_STORAGE_KEY = 'shenxianyun.accessExpiresAt'
 const CODE_UPDATE_VERSION_STORAGE_KEY = 'shenxianyun.updateVersion'
 const CLIENT_ID_STORAGE_KEY = 'shenxianyun.clientId'
+// 到期占位配置的本地 UID，续费恢复后用它定位并删除占位配置。
+const EXPIRED_PROFILE_UID_KEY = 'shenxianyun.expiredProfileUid'
 const DELAY_TIMEOUT = 5000
 const TRAFFIC_REPORT_INTERVAL_MS = 300_000
 const MAX_TRAFFIC_REPORT_DELTA = 5 * 1024 * 1024 * 1024
+// 订阅更新轮询：仅在已连接时运行，基础间隔 10 分钟，失败时指数退避到最多 1 小时。
+const UPDATE_POLL_BASE_MS = 600_000
+const UPDATE_POLL_MAX_MS = 3_600_000
+const EXPIRED_NODE_NAME = '提取码到期，请续费使用'
+const EXPIRED_PROFILE_NAME = '提取码已到期'
+// 生成一个只含单个本地不可上网节点的占位配置：所有流量指向一个不可达的本地 socks5，
+// 客户端因此无法上网，而节点名直接提示用户续费。
+const buildExpiredProfileYaml = () =>
+  yaml.dump({
+    proxies: [
+      {
+        name: EXPIRED_NODE_NAME,
+        type: 'socks5',
+        server: '127.0.0.1',
+        port: 1,
+      },
+    ],
+    'proxy-groups': [
+      {
+        name: '节点选择',
+        type: 'select',
+        proxies: [EXPIRED_NODE_NAME],
+      },
+    ],
+    // 订阅/续费域名走直连，保证续费页可访问、占位期间仍能探测到续费并自动恢复；
+    // 其余流量全部走不可达的占位节点（无法上网）。
+    rules: ['DOMAIN-SUFFIX,jc116.com,DIRECT', 'MATCH,节点选择'],
+  })
 const DESKTOP_VERSION = '2.4.9'
 const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.4.9'
 const DESKTOP_PLATFORM = getSystem()
@@ -467,6 +499,19 @@ const HomePage = () => {
   const [selfCheckItems, setSelfCheckItems] = useState<SelfCheckItem[]>([])
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false)
   const [resetting, setResetting] = useState(false)
+  // 到期提示弹窗
+  const [expiredDialogOpen, setExpiredDialogOpen] = useState(false)
+  // 手动配置管理（应对 web 断网无法导入订阅时，自行切换/导入/编辑本地配置）
+  const [profileManagerOpen, setProfileManagerOpen] = useState(false)
+  const [manualImportUrl, setManualImportUrl] = useState('')
+  const [manualBusy, setManualBusy] = useState(false)
+  const [editorState, setEditorState] = useState<{
+    uid: string
+    name: string
+    value: string
+  } | null>(null)
+  // 订阅更新在途互斥：防止慢请求/掉线恢复时积累并发请求打满服务器。
+  const updateInFlightRef = useRef(false)
   const [desktopUpdate, setDesktopUpdate] =
     useState<DesktopVersionResponse | null>(null)
   const [busy, setBusy] = useState(false)
@@ -574,11 +619,14 @@ const HomePage = () => {
     ].filter((value): value is string => Boolean(value))
     return Array.from(new Set(values))
   }, [nodes, primaryGroup?.name, selectedNode])
-  const verifyCode = async (input: string): Promise<ValidVerifyResponse> => {
+  const verifyCode = async (
+    input: string,
+    countImport = true,
+  ): Promise<ValidVerifyResponse> => {
     const params = new URLSearchParams({
-      import: '1',
       client_id: getClientId(),
     })
+    if (countImport) params.set('import', '1')
     const response = await tauriFetch(
       `${SUBSCRIPTION_BASE_URL}/api/verify/${encodeURIComponent(input)}?${params.toString()}`,
       {
@@ -820,6 +868,78 @@ const HomePage = () => {
     throw lastError instanceof Error ? lastError : new Error(String(lastError))
   }
 
+  // 提取码到期：切换到只含一个不可上网节点的本地占位配置（节点名提示续费），
+  // 而不是直接拒绝开启。续费后会自动检测并恢复正常订阅。
+  const activateExpiredProfile = useCallback(async () => {
+    const existingUid = localStorage.getItem(EXPIRED_PROFILE_UID_KEY) || ''
+    const list = await getProfiles()
+    let targetUid = existingUid
+      ? list.items?.find((item) => item.uid === existingUid)?.uid
+      : undefined
+    if (!targetUid) {
+      await createProfile(
+        {
+          type: 'local',
+          name: EXPIRED_PROFILE_NAME,
+          desc: '续费并重新导入提取码后自动恢复',
+          url: '',
+          option: { with_proxy: false, self_proxy: false },
+        } as IProfileItem,
+        buildExpiredProfileYaml(),
+      )
+      const refreshed = await getProfiles()
+      targetUid = refreshed.items?.at(-1)?.uid
+      if (targetUid) localStorage.setItem(EXPIRED_PROFILE_UID_KEY, targetUid)
+    }
+    if (targetUid) {
+      const latest = await getProfiles()
+      await patchProfilesConfig({ ...latest, current: targetUid })
+      await mutateProfiles()
+      await refreshAll()
+    }
+  }, [mutateProfiles, refreshAll])
+
+  // 当前是否正处于到期占位配置
+  const onExpiredProfile = useCallback(() => {
+    const uid = localStorage.getItem(EXPIRED_PROFILE_UID_KEY) || ''
+    return Boolean(uid && current?.uid === uid)
+  }, [current?.uid])
+
+  // 续费恢复：重新校验提取码（不计入导入次数），成功则重新导入正式订阅并删除占位配置。
+  const recoverFromExpired = useCallback(async () => {
+    const value = savedCode
+    if (!value) return false
+    // verifyCode 在提取码仍失效/过期时会抛错，此时保持占位配置不变。
+    const data = await verifyCode(value, false)
+    await importProfile(data.subscription_url, {
+      with_proxy: true,
+      allow_auto_update: false,
+    })
+    const list = await getProfiles()
+    const newest = list.items?.at(-1)
+    if (newest?.uid) {
+      const others =
+        list.items?.filter((item) => item.uid !== newest.uid) || []
+      await Promise.all(
+        others.map((item) =>
+          item.uid ? deleteProfile(item.uid).catch(() => {}) : Promise.resolve(),
+        ),
+      )
+      const single = await getProfiles()
+      await patchProfilesConfig({ ...single, current: newest.uid })
+    }
+    localStorage.removeItem(EXPIRED_PROFILE_UID_KEY)
+    localStorage.setItem(CODE_EXPIRES_STORAGE_KEY, data.expires_at || '')
+    localStorage.setItem(
+      CODE_UPDATE_VERSION_STORAGE_KEY,
+      String(data.update_version || 0),
+    )
+    setExpiresAt(data.expires_at || '')
+    await mutateProfiles()
+    await refreshAll()
+    return true
+  }, [savedCode, mutateProfiles, refreshAll])
+
   const importByCode = useLockFn(async () => {
     const value = code.trim()
     if (!value) {
@@ -893,10 +1013,33 @@ const HomePage = () => {
     }
   }, [reportClientTraffic, running, savedCode])
 
+  // 订阅更新轮询：只在「已连接 && 有提取码」时运行，避免空闲时持续打服务器。
+  // 单次请求加在途互斥；失败时指数退避并叠加随机抖动，防止 web 掉线恢复后所有客户端同时冲击。
   useEffect(() => {
-    if (!savedCode) return
+    if (!running || !savedCode) return
 
-    const checkUpdate = async () => {
+    let cancelled = false
+    let timer: number | undefined
+    let failures = 0
+
+    // 返回 true 表示本轮网络请求成功（用于复位退避）。
+    const checkOnce = async (): Promise<boolean> => {
+      // 处于到期占位配置时，低频探测提取码是否已续费，成功则自动恢复正式订阅。
+      if (onExpiredProfile()) {
+        try {
+          const recovered = await recoverFromExpired()
+          if (recovered) {
+            setExpiredDialogOpen(false)
+            setStatus('提取码已续费，订阅已自动恢复')
+          }
+          return true
+        } catch (error) {
+          // 仍未续费/服务器拒绝 → 保持占位配置；网络错误则交给退避。
+          if (error instanceof AccessCodeStateError) return true
+          throw error
+        }
+      }
+
       try {
         const state = await updateState(savedCode)
         const remoteVersion = Number(state.update_version || 0)
@@ -914,6 +1057,7 @@ const HomePage = () => {
           await refreshAll()
           setStatus('订阅已更新')
         }
+        return true
       } catch (error) {
         const blockedByServer =
           error instanceof AccessCodeStateError && error.serverRejected
@@ -921,42 +1065,62 @@ const HomePage = () => {
           expiresAt && Date.now() > parseExpireTime(expiresAt),
         )
 
-        if (running && (blockedByServer || blockedByLocalExpire)) {
-          if (tunOn) await patchVerge({ enable_tun_mode: false })
-          if (systemProxyOn || systemProxyConfigOn) {
-            await toggleSystemProxy(false)
-          }
-          await stopCore().catch(() => {})
-          await invalidateProxyState()
-        }
-
+        // 已到期：切换到占位配置并弹窗提示续费（保持连接而非直接断开）。
         if (blockedByServer || blockedByLocalExpire) {
-          setStatus(error instanceof Error ? error.message : String(error))
-        } else {
-          setStatus('')
+          await activateExpiredProfile().catch(() => {})
+          setExpiredDialogOpen(true)
+          setStatus('提取码已到期，请续费后重新使用')
+          return true
         }
+        // 纯网络错误：抛出以触发退避。
+        throw error
       }
     }
 
-    checkUpdate().catch(() => {})
-    const timer = window.setInterval(() => {
-      checkUpdate().catch(() => {})
-    }, 600_000)
+    const schedule = () => {
+      if (cancelled) return
+      const backoff = Math.min(
+        UPDATE_POLL_BASE_MS * 2 ** failures,
+        UPDATE_POLL_MAX_MS,
+      )
+      // 50%~100% 抖动，打散客户端请求时间，避免惊群。
+      const delay = backoff * (0.5 + Math.random() * 0.5)
+      timer = window.setTimeout(run, delay)
+    }
 
-    return () => window.clearInterval(timer)
+    const run = async () => {
+      if (cancelled) return
+      if (updateInFlightRef.current) {
+        schedule()
+        return
+      }
+      updateInFlightRef.current = true
+      try {
+        await checkOnce()
+        failures = 0
+      } catch {
+        failures = Math.min(failures + 1, 4)
+      } finally {
+        updateInFlightRef.current = false
+      }
+      schedule()
+    }
+
+    run()
+    return () => {
+      cancelled = true
+      if (timer) window.clearTimeout(timer)
+    }
   }, [
+    activateExpiredProfile,
     current?.uid,
     expiresAt,
-    invalidateProxyState,
     mutateProfiles,
-    patchVerge,
+    onExpiredProfile,
+    recoverFromExpired,
     refreshAll,
     running,
     savedCode,
-    systemProxyConfigOn,
-    systemProxyOn,
-    toggleSystemProxy,
-    tunOn,
     updateCurrentProfileKeepingRules,
     updateState,
   ])
@@ -977,6 +1141,114 @@ const HomePage = () => {
       setStatus(error instanceof Error ? error.message : String(error))
     } finally {
       setBusy(false)
+    }
+  })
+
+  // ===== 手动配置管理：应对 web 断网无法导入订阅时，自行导入/切换/编辑本地配置 =====
+  const profileList = profiles?.items || []
+
+  const manualImportByUrl = useLockFn(async () => {
+    const url = manualImportUrl.trim()
+    if (!url) {
+      setStatus('请输入订阅链接')
+      return
+    }
+    setManualBusy(true)
+    setStatus('正在导入订阅...')
+    try {
+      // 不开启周期性自动更新，避免无谓重下整个配置。
+      await importProfile(url, { with_proxy: true, allow_auto_update: false })
+      const list = await getProfiles()
+      const newest = list.items?.at(-1)
+      if (newest?.uid) {
+        await patchProfilesConfig({ ...list, current: newest.uid })
+      }
+      setManualImportUrl('')
+      await mutateProfiles()
+      await refreshAll()
+      setStatus('订阅已导入并切换')
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error))
+    } finally {
+      setManualBusy(false)
+    }
+  })
+
+  const manualCreateLocal = useLockFn(async () => {
+    setManualBusy(true)
+    setStatus('正在新建本地配置...')
+    try {
+      await createProfile(
+        {
+          type: 'local',
+          name: `本地配置 ${new Date().toLocaleString()}`,
+          desc: '手动编辑的本地 Clash 配置',
+          url: '',
+          option: { with_proxy: false, self_proxy: false },
+        } as IProfileItem,
+        yaml.dump({ proxies: [], 'proxy-groups': [], rules: [] }),
+      )
+      await mutateProfiles()
+      await refreshAll()
+      setStatus('已新建本地配置，可点击编辑填入节点')
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error))
+    } finally {
+      setManualBusy(false)
+    }
+  })
+
+  const manualSwitch = useLockFn(async (uid: string) => {
+    setManualBusy(true)
+    try {
+      const list = await getProfiles()
+      await patchProfilesConfig({ ...list, current: uid })
+      await mutateProfiles()
+      await refreshAll()
+      setStatus('已切换配置文件')
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error))
+    } finally {
+      setManualBusy(false)
+    }
+  })
+
+  const manualDelete = useLockFn(async (uid: string) => {
+    setManualBusy(true)
+    try {
+      await deleteProfile(uid)
+      if (localStorage.getItem(EXPIRED_PROFILE_UID_KEY) === uid) {
+        localStorage.removeItem(EXPIRED_PROFILE_UID_KEY)
+      }
+      await mutateProfiles()
+      await refreshAll()
+      setStatus('已删除配置文件')
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error))
+    } finally {
+      setManualBusy(false)
+    }
+  })
+
+  const manualEdit = useLockFn(async (uid: string, name: string) => {
+    try {
+      const value = await readProfileFile(uid)
+      setEditorState({ uid, name, value })
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error))
+    }
+  })
+
+  const manualSaveEdit = useLockFn(async () => {
+    if (!editorState) return
+    try {
+      await saveProfileFile(editorState.uid, editorState.value)
+      await mutateProfiles()
+      await refreshAll()
+      setStatus('配置已保存')
+      setEditorState(null)
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error))
     }
   })
 
@@ -1010,25 +1282,32 @@ const HomePage = () => {
       }
 
       setStatus('正在检查提取码有效期...')
-      if (expiresAt && Date.now() > parseExpireTime(expiresAt)) {
-        setStatus('提取码已过期，不能开启代理')
-        return
+      let expired = Boolean(expiresAt && Date.now() > parseExpireTime(expiresAt))
+
+      if (!expired) {
+        try {
+          const state = await updateState(currentCode)
+          if (state.update_version) {
+            localStorage.setItem(
+              CODE_UPDATE_VERSION_STORAGE_KEY,
+              String(state.update_version),
+            )
+          }
+        } catch (error) {
+          if (error instanceof AccessCodeStateError && error.serverRejected) {
+            expired = true
+          } else {
+            // 网络错误（如 web 掉线）不阻止开启，仍用本地已有订阅。
+            setStatus('')
+          }
+        }
       }
 
-      try {
-        const state = await updateState(currentCode)
-        if (state.update_version) {
-          localStorage.setItem(
-            CODE_UPDATE_VERSION_STORAGE_KEY,
-            String(state.update_version),
-          )
-        }
-      } catch (error) {
-        if (error instanceof AccessCodeStateError && error.serverRejected) {
-          setStatus(error.message)
-          return
-        }
-        setStatus('')
+      // 已到期：仍允许开启开关，但切换到只含一个不可上网节点的占位配置，并弹窗提示续费。
+      // 续费后由轮询自动检测并恢复正式订阅。
+      if (expired) {
+        await activateExpiredProfile().catch(() => {})
+        setExpiredDialogOpen(true)
       }
 
       setStatus('正在启动...')
@@ -2245,6 +2524,47 @@ const HomePage = () => {
                 <Paper
                   elevation={0}
                   sx={{
+                    p: 1.6,
+                    borderRadius: '14px',
+                    border: '1px solid rgba(28,141,255,.28)',
+                    bgcolor: 'rgba(28,141,255,.06)',
+                  }}
+                >
+                  <Stack
+                    direction="row"
+                    spacing={1.1}
+                    sx={{ alignItems: 'center' }}
+                  >
+                    <SettingsRounded sx={{ color: '#1c8dff' }} />
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography sx={{ fontWeight: 850 }}>
+                        手动配置管理
+                      </Typography>
+                      <Typography
+                        sx={{ fontSize: 12, color: 'rgba(36,46,66,.62)' }}
+                      >
+                        web 断网时自行导入/切换/编辑配置文件，也可导入其它
+                        Clash 订阅。
+                      </Typography>
+                    </Box>
+                    <Button
+                      size="small"
+                      variant="contained"
+                      disabled={busy}
+                      onClick={() => setProfileManagerOpen(true)}
+                      sx={{
+                        bgcolor: '#1c8dff',
+                        fontWeight: 800,
+                        '&:hover': { bgcolor: '#167ce3' },
+                      }}
+                    >
+                      打开管理
+                    </Button>
+                  </Stack>
+                </Paper>
+                <Paper
+                  elevation={0}
+                  sx={{
                     p: 1.25,
                     borderRadius: '14px',
                     border: '1px solid rgba(45,65,105,.12)',
@@ -2926,6 +3246,222 @@ const HomePage = () => {
               </Button>
             </DialogActions>
           </Dialog>
+
+          {/* 手动配置管理：导入/切换/编辑/删除本地或第三方 Clash 订阅 */}
+          <Dialog
+            open={profileManagerOpen}
+            onClose={() => setProfileManagerOpen(false)}
+            fullWidth
+            maxWidth="sm"
+          >
+            <DialogTitle sx={{ fontWeight: 900, pb: 0.5 }}>
+              手动配置管理
+            </DialogTitle>
+            <DialogContent sx={{ pt: 1.5 }}>
+              <Stack spacing={1.6}>
+                <Typography sx={{ fontSize: 12, color: 'rgba(36,46,66,.62)' }}>
+                  web 断网或无法导入提取码订阅时，可在此手动导入其它 Clash
+                  订阅链接、新建/编辑本地配置，并随时切换当前使用的配置文件。
+                </Typography>
+                <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="订阅链接（http/https）"
+                    value={manualImportUrl}
+                    onChange={(e) => setManualImportUrl(e.target.value)}
+                    disabled={manualBusy}
+                    sx={fieldSx}
+                  />
+                  <Button
+                    variant="contained"
+                    disabled={manualBusy || !manualImportUrl.trim()}
+                    onClick={manualImportByUrl}
+                    sx={{
+                      minWidth: 84,
+                      bgcolor: '#1c8dff',
+                      fontWeight: 800,
+                      '&:hover': { bgcolor: '#167ce3' },
+                    }}
+                  >
+                    导入
+                  </Button>
+                </Stack>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  disabled={manualBusy}
+                  startIcon={<AddRounded />}
+                  onClick={manualCreateLocal}
+                  sx={outlineButtonSx}
+                >
+                  新建本地空配置
+                </Button>
+                <Typography sx={{ fontWeight: 850, fontSize: 13, mt: 0.5 }}>
+                  已有配置文件
+                </Typography>
+                {profileList.length === 0 ? (
+                  <Typography
+                    sx={{ fontSize: 12, color: 'rgba(36,46,66,.5)' }}
+                  >
+                    暂无配置文件，请先导入或新建。
+                  </Typography>
+                ) : (
+                  <Stack spacing={1}>
+                    {profileList.map((item) => {
+                      const isCurrent = profiles?.current === item.uid
+                      return (
+                        <Paper
+                          key={item.uid}
+                          elevation={0}
+                          sx={{
+                            p: 1.2,
+                            borderRadius: '12px',
+                            border: isCurrent
+                              ? '1px solid rgba(28,141,255,.55)'
+                              : '1px solid rgba(45,65,105,.18)',
+                            bgcolor: isCurrent
+                              ? 'rgba(28,141,255,.08)'
+                              : 'rgba(255,255,255,.7)',
+                          }}
+                        >
+                          <Stack
+                            direction="row"
+                            spacing={1}
+                            sx={{ alignItems: 'center' }}
+                          >
+                            <Box sx={{ flex: 1, minWidth: 0 }}>
+                              <Stack
+                                direction="row"
+                                spacing={0.8}
+                                sx={{ alignItems: 'center' }}
+                              >
+                                <Typography
+                                  noWrap
+                                  sx={{ fontWeight: 800, fontSize: 13 }}
+                                >
+                                  {item.name || item.uid}
+                                </Typography>
+                                {isCurrent && (
+                                  <Chip
+                                    size="small"
+                                    label="使用中"
+                                    color="primary"
+                                  />
+                                )}
+                              </Stack>
+                              <Typography
+                                noWrap
+                                sx={{
+                                  fontSize: 11,
+                                  color: 'rgba(36,46,66,.55)',
+                                }}
+                              >
+                                {item.type === 'remote' ? '远程订阅' : '本地配置'}
+                              </Typography>
+                            </Box>
+                            <Button
+                              size="small"
+                              disabled={manualBusy || isCurrent}
+                              onClick={() =>
+                                item.uid && manualSwitch(item.uid)
+                              }
+                            >
+                              切换
+                            </Button>
+                            <Button
+                              size="small"
+                              disabled={manualBusy}
+                              onClick={() =>
+                                item.uid &&
+                                manualEdit(item.uid, item.name || item.uid)
+                              }
+                            >
+                              编辑
+                            </Button>
+                            <IconButton
+                              size="small"
+                              disabled={manualBusy || isCurrent}
+                              onClick={() => item.uid && manualDelete(item.uid)}
+                            >
+                              <DeleteRounded fontSize="small" />
+                            </IconButton>
+                          </Stack>
+                        </Paper>
+                      )
+                    })}
+                  </Stack>
+                )}
+              </Stack>
+            </DialogContent>
+            <DialogActions sx={{ px: 3, pb: 2.5 }}>
+              <Button onClick={() => setProfileManagerOpen(false)}>完成</Button>
+            </DialogActions>
+          </Dialog>
+
+          {/* 提取码到期提示 */}
+          <Dialog
+            open={expiredDialogOpen}
+            onClose={() => setExpiredDialogOpen(false)}
+            fullWidth
+            maxWidth="xs"
+          >
+            <DialogTitle sx={{ fontWeight: 900, pb: 0.5 }}>
+              提取码已到期
+            </DialogTitle>
+            <DialogContent sx={{ pt: 1.5 }}>
+              <Typography sx={{ fontSize: 13.5, lineHeight: 1.7 }}>
+                当前提取码已到期，已自动切换到「{EXPIRED_NODE_NAME}
+                」占位节点，暂时无法上网。
+                <br />
+                请续费后重新导入提取码即可恢复；续费成功后也会自动检测并恢复正常订阅。
+              </Typography>
+            </DialogContent>
+            <DialogActions sx={{ px: 3, pb: 2.5 }}>
+              <Button
+                variant="contained"
+                onClick={() => {
+                  openWebUrl(
+                    `${SUBSCRIPTION_BASE_URL}/pay?action=renew&code=${encodeURIComponent(savedCode)}`,
+                  ).catch(() => undefined)
+                }}
+                sx={{
+                  bgcolor: '#1c8dff',
+                  fontWeight: 800,
+                  '&:hover': { bgcolor: '#167ce3' },
+                }}
+              >
+                去续费
+              </Button>
+              <Button
+                onClick={() => {
+                  setExpiredDialogOpen(false)
+                  setCodeDialogOpen(true)
+                }}
+              >
+                重新导入提取码
+              </Button>
+              <Button onClick={() => setExpiredDialogOpen(false)}>关闭</Button>
+            </DialogActions>
+          </Dialog>
+
+          {/* 本地配置编辑器 */}
+          {editorState && (
+            <EditorViewer
+              open={Boolean(editorState)}
+              title={`编辑：${editorState.name}`}
+              value={editorState.value}
+              language="yaml"
+              path={`${editorState.uid}.yaml`}
+              onChange={(value) =>
+                setEditorState((prev) =>
+                  prev ? { ...prev, value: value ?? '' } : prev,
+                )
+              }
+              onSave={manualSaveEdit}
+              onClose={() => setEditorState(null)}
+            />
+          )}
         </Stack>
       </Box>
     </BasePage>
