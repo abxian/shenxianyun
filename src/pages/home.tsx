@@ -83,6 +83,8 @@ const CODE_UPDATE_VERSION_STORAGE_KEY = 'shenxianyun.updateVersion'
 const CLIENT_ID_STORAGE_KEY = 'shenxianyun.clientId'
 // 到期占位配置的本地 UID，续费恢复后用它定位并删除占位配置。
 const EXPIRED_PROFILE_UID_KEY = 'shenxianyun.expiredProfileUid'
+// 「提取码订阅」对应的配置 UID。切码/恢复时只替换这一张，保留用户手动导入/新建的其它配置。
+const CODE_PROFILE_UID_KEY = 'shenxianyun.codeProfileUid'
 const DELAY_TIMEOUT = 5000
 const TRAFFIC_REPORT_INTERVAL_MS = 300_000
 const MAX_TRAFFIC_REPORT_DELTA = 5 * 1024 * 1024 * 1024
@@ -808,14 +810,18 @@ const HomePage = () => {
       try {
         const data = await verifyCode(value)
 
-        if (savedCode && savedCode !== value && current?.uid) {
+        // 切换到不同提取码时，先停代理再切换；同一提取码重新导入则无需停。
+        if (savedCode && savedCode !== value && running) {
           await stopCore().catch(() => {})
           if (tunOn) await patchVerge({ enable_tun_mode: false })
           if (systemProxyOn || systemProxyConfigOn) {
             await toggleSystemProxy(false)
           }
-          await deleteProfile(current.uid).catch(() => {})
         }
+
+        // 记录切换前的「提取码订阅」配置，导入新订阅后只删它，保留用户其它配置。
+        const prevCodeProfileUid =
+          localStorage.getItem(CODE_PROFILE_UID_KEY) || ''
 
         // 不开启 clash verge 的周期性自动更新（那会无视内容是否变化、定时重下整个配置，浪费带宽）。
         // 改为只靠后端 update_version 推送：仅当 /api/update-state 的版本号变大时才重新拉取订阅。
@@ -827,17 +833,11 @@ const HomePage = () => {
         const latestProfiles = await getProfiles()
         const newestProfile = latestProfiles.items?.at(-1)
         if (newestProfile?.uid) {
-          const oldProfiles =
-            latestProfiles.items?.filter(
-              (item) => item.uid !== newestProfile.uid,
-            ) || []
-          await Promise.all(
-            oldProfiles.map((item) =>
-              item.uid
-                ? deleteProfile(item.uid).catch(() => {})
-                : Promise.resolve(),
-            ),
-          )
+          // 只删除上一张「提取码订阅」配置，绝不动用户手动导入/新建的配置与全局 Merge。
+          if (prevCodeProfileUid && prevCodeProfileUid !== newestProfile.uid) {
+            await deleteProfile(prevCodeProfileUid).catch(() => {})
+          }
+          localStorage.setItem(CODE_PROFILE_UID_KEY, newestProfile.uid)
 
           const singleProfileConfig = await getProfiles()
           await patchProfilesConfig({
@@ -910,6 +910,8 @@ const HomePage = () => {
     const value = savedCode
     if (!value) return false
     // verifyCode 在提取码仍失效/过期时会抛错，此时保持占位配置不变。
+    const prevCodeProfileUid = localStorage.getItem(CODE_PROFILE_UID_KEY) || ''
+    const expiredUid = localStorage.getItem(EXPIRED_PROFILE_UID_KEY) || ''
     const data = await verifyCode(value, false)
     await importProfile(data.subscription_url, {
       with_proxy: true,
@@ -918,13 +920,11 @@ const HomePage = () => {
     const list = await getProfiles()
     const newest = list.items?.at(-1)
     if (newest?.uid) {
-      const others =
-        list.items?.filter((item) => item.uid !== newest.uid) || []
-      await Promise.all(
-        others.map((item) =>
-          item.uid ? deleteProfile(item.uid).catch(() => {}) : Promise.resolve(),
-        ),
-      )
+      // 只删除到期占位配置和上一张提取码订阅，保留用户手动导入/新建的其它配置。
+      for (const uid of [expiredUid, prevCodeProfileUid]) {
+        if (uid && uid !== newest.uid) await deleteProfile(uid).catch(() => {})
+      }
+      localStorage.setItem(CODE_PROFILE_UID_KEY, newest.uid)
       const single = await getProfiles()
       await patchProfilesConfig({ ...single, current: newest.uid })
     }
@@ -1229,6 +1229,9 @@ const HomePage = () => {
       await deleteProfile(uid)
       if (localStorage.getItem(EXPIRED_PROFILE_UID_KEY) === uid) {
         localStorage.removeItem(EXPIRED_PROFILE_UID_KEY)
+      }
+      if (localStorage.getItem(CODE_PROFILE_UID_KEY) === uid) {
+        localStorage.removeItem(CODE_PROFILE_UID_KEY)
       }
       await mutateProfiles()
       await refreshAll()
