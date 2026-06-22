@@ -104,6 +104,93 @@ Clash Verge rev was based on or inspired by these projects and so on:
 - [Fndroid/clash_for_windows_pkg](https://github.com/Fndroid/clash_for_windows_pkg): A Windows/macOS GUI based on Clash.
 - [vitejs/vite](https://github.com/vitejs/vite): Next generation frontend tooling. It's fast!
 
+## 神仙云发布与分发流程（PC 桌面端）
+
+> 每次更新提交、编译、发布都要遵循以下流程。安卓端流程见
+> [shenxianyun-android](https://github.com/abxian/shenxianyun-android) 的 README。
+
+### 一、改完代码后必须先升版本号
+
+桌面端版本号有 **4 处必须同步修改**，否则 Release Action 的「版本一致性校验」会失败：
+
+| 文件 | 字段 |
+| --- | --- |
+| `package.json` | `"version"` |
+| `src-tauri/tauri.conf.json` | `"version"` |
+| `src-tauri/Cargo.toml` | `version`（`[package]`） |
+| `Cargo.lock` | `name = "clash-verge"` 对应的 `version` |
+
+四处版本号必须完全一致（例如 `2.5.12`）。
+
+### 二、提交并触发公开仓库 Action 编译
+
+Release Build（`.github/workflows/release.yml`）**只由 `v*.*.*` 形式的 git tag 触发**，
+且会校验：① tag 所在 commit 必须在 `origin/main` 上；② tag 版本号必须与 `package.json` 一致。
+
+```bash
+# 在 main 分支上提交
+git add -A
+git commit -m "feat: xxx (v2.5.12)"
+git push origin main
+
+# 打与版本号一致的 tag 并推送，触发 Release Build
+git tag v2.5.12
+git push origin v2.5.12
+```
+
+Action 会在 Windows / macOS / Linux / ARM 全平台编译（约 30~40 分钟），
+并把安装包上传到本仓库的 GitHub Release **`v<版本号>`**（标题 `Clash Verge Rev v<版本号>`）。
+
+- 桌面更新签名用 **Tauri updater 私钥**，存放在私有仓库
+  [`abxian/shenxianyun-keys`](https://github.com/abxian/shenxianyun-keys)：
+  `shenxianyun-updater.key` / `shenxianyun-updater.key.pub` / `updater-key-password.txt`，
+  对应 CI secrets `TAURI_PRIVATE_KEY` / `TAURI_KEY_PASSWORD`。**切勿泄露或提交进公开仓库。**
+
+### 三、从 GitHub Release 下载安装包
+
+Action 跑完后到本仓库 Release `v<版本号>` 页面下载（`<ver>` 为版本号，如 `2.5.12`）：
+
+| 平台 | Action 产物文件名 |
+| --- | --- |
+| Windows 64 位（常用） | `Clash.Verge_<ver>_x64-setup.exe` |
+| macOS Apple 芯片 | `Clash.Verge_<ver>_aarch64.dmg` |
+| macOS Intel 芯片 | `Clash.Verge_<ver>_x64.dmg` |
+| Linux deb 64 位 | `Clash.Verge_<ver>_amd64.deb` |
+| Linux rpm 64 位 | `Clash.Verge-<ver>-1.x86_64.rpm` |
+
+### 四、重命名后上传到 dufs 分发服务
+
+分发服务器：**<http://114.80.36.225:15667/shenxianyun/>**（dufs，支持 WebDAV PUT）。
+下载到的安装包按下表**重命名为固定名称**（用户/后台始终按固定名下载），再用 `curl -T`（PUT）上传：
+
+| 固定分发名 | 来源产物 |
+| --- | --- |
+| `神仙云.exe` | `Clash.Verge_<ver>_x64-setup.exe` |
+| `神仙云.dmg` | `Clash.Verge_<ver>_<arch>.dmg`（按需选 aarch64 / x64） |
+| `神仙云.deb` | `Clash.Verge_<ver>_amd64.deb` |
+| `神仙云.rpm` | `Clash.Verge-<ver>-1.x86_64.rpm` |
+
+```bash
+DUFS=http://114.80.36.225:15667/shenxianyun
+# 先把下载的安装包重命名为固定名，再 PUT 上传（覆盖同名文件）
+curl -T 神仙云.exe "$DUFS/神仙云.exe"
+curl -T 神仙云.dmg "$DUFS/神仙云.dmg"
+curl -T 神仙云.deb "$DUFS/神仙云.deb"
+curl -T 神仙云.rpm "$DUFS/神仙云.rpm"
+# 若 dufs 开启了鉴权，加 -u 用户名:密码
+# curl -u user:pass -T 神仙云.exe "$DUFS/神仙云.exe"
+```
+
+> 安卓的 `神仙云.apk` / `shenxianyunall.apk` 由 android 仓库流程产出后上传到同一目录。
+
+### 五、流程速记（每次发布都照做）
+
+1. 改代码 → **同步改 4 处版本号**。
+2. `git commit` 到 main → `git push origin main`。
+3. 打 `v<版本号>` tag → `git push origin <tag>`，触发 Release Build。
+4. 等 Action 跑完 → 到 Release `v<版本号>` 下载安装包。
+5. 重命名为 `神仙云.exe/.dmg/.deb/.rpm` → `curl -T` 上传到 dufs。
+
 ## License
 
 GPL-3.0 License. See [License here](./LICENSE) for details.
