@@ -167,10 +167,8 @@ jobs:
             target: aarch64-pc-windows-msvc
           - os: macos-latest
             target: aarch64-apple-darwin
-          # macos-latest 已迁移到 Apple Silicon(ARM)，无法在 /opt/homebrew 下用
-          # Rosetta 装 x86 OpenSSL。Intel 产物固定用最后一版 Intel runner macos-13。
-          - os: macos-13
-            target: x86_64-apple-darwin
+          # x86_64-apple-darwin(Intel mac)不常见，已拆到独立的 release-macos-x64
+          # 任务：仅编译成 artifact，不进 Release、不阻塞其它平台发布。
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
 
@@ -204,15 +202,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxslt1.1 libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-
-      - name: Install x86 OpenSSL (macOS only)
-        if: matrix.target == 'x86_64-apple-darwin'
-        run: |
-          arch -x86_64 brew install openssl@3
-          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=$(brew --prefix openssl@3)/include" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=$(brew --prefix openssl@3)/lib" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> $GITHUB_ENV
 
       - name: Install Node
         uses: actions/setup-node@v6
@@ -275,6 +264,86 @@ jobs:
           subject-path: |
             target/${{ matrix.target }}/release/bundle/deb/*.deb
             target/${{ matrix.target }}/release/bundle/rpm/*.rpm
+
+  release-macos-x64:
+    # x86_64-apple-darwin(Intel mac)不常见：单独在 Intel runner(macos-13)编译，
+    # 产物只作为 workflow artifact 上传，不写入 GitHub Release、不阻塞其它平台发布。
+    # 需要分发时手动下载 artifact 再传 dufs。continue-on-error 保证它失败也不拖垮发布。
+    name: Build macOS x64 (artifact only)
+    needs: [check_tag_version]
+    continue-on-error: true
+    runs-on: macos-13
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.95.0'
+          targets: x86_64-apple-darwin
+
+      - name: Add Rust Target
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/dev' }}
+          prefix-key: 'v1-rust'
+          key: 'rust-shared-stable-macos-13-x86_64-apple-darwin'
+          workspaces: |
+            . -> target
+          cache-all-crates: true
+          cache-workspace-crates: true
+
+      - name: Install x86 OpenSSL
+        run: |
+          arch -x86_64 brew install openssl@3
+          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=$(brew --prefix openssl@3)/include" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=$(brew --prefix openssl@3)/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> $GITHUB_ENV
+
+      - name: Install Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24.16.0'
+
+      - uses: pnpm/action-setup@v6
+        name: Install pnpm
+        with:
+          run_install: false
+
+      - name: Pnpm install and check
+        run: |
+          pnpm i
+          pnpm run prebuild x86_64-apple-darwin
+
+      - name: Add Rust Target
+        run: |
+          rustup target add x86_64-apple-darwin --toolchain 1.95.0 || rustup target add x86_64-apple-darwin
+          rustup target list --installed
+
+      - name: Tauri build (no release upload)
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          NODE_OPTIONS: '--max_old_space_size=4096'
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        with:
+          # 故意不传 tagName → tauri-action 只编译，不创建/上传 GitHub Release
+          tauriScript: pnpm
+          args: --target x86_64-apple-darwin
+
+      - name: Upload macOS x64 dmg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 神仙云-macos-x64-dmg
+          path: target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: warn
+          retention-days: 30
 
   release-for-linux-arm:
     name: Release Build for Linux ARM
