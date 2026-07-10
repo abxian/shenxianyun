@@ -67,7 +67,9 @@ export const ProxyHead = ({
   const { verge } = useVerge()
   const defaultLatencyUrl =
     verge?.default_latency_test?.trim() ||
-    'http://cp.cloudflare.com/generate_204'
+    // 默认改用 gstatic 的 HTTPS 204：cp.cloudflare.com 的明文 HTTP 端点常被限速/挂起，
+    // 导致节点其实可用却测出“超时”。
+    'https://www.gstatic.com/generate_204'
 
   useEffect(() => {
     delayManager.setUrl(groupName, testUrl?.trim() || url || defaultLatencyUrl)

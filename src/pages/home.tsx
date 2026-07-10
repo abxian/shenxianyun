@@ -1406,6 +1406,16 @@ const HomePage = () => {
     ) || 7897
   const proxyUrl = `http://127.0.0.1:${mixedPort}`
 
+  // 局域网端口提示：混合端口同时支持 HTTP/SOCKS；若单独开了 HTTP/SOCKS 端口也一并展示。
+  const httpPort = verge?.verge_port
+  const httpEnabled = verge?.verge_http_enabled ?? false
+  const socksPort = verge?.verge_socks_port
+  const socksEnabled = verge?.verge_socks_enabled ?? false
+  const lanPortHint =
+    `混合端口 ${mixedPort}（HTTP/SOCKS 通用）` +
+    (httpEnabled && httpPort ? ` · HTTP ${httpPort}` : '') +
+    (socksEnabled && socksPort ? ` · SOCKS ${socksPort}` : '')
+
   // 真实发起一次 HTTP 探测；viaProxy=true 时强制走核心混合端口，
   // 等价于「浏览器开了代理后」的真实出网路径。
   const probe = useCallback(
@@ -1432,11 +1442,19 @@ const HomePage = () => {
   const fetchEgress = useCallback(
     async (viaProxy: boolean, ipv6 = false) => {
       const endpoints = ipv6
-        ? ['https://api6.ipify.org?format=json', 'https://6.ipw.cn/api/ip/myip?json']
+        ? [
+            'https://api6.ipify.org?format=json',
+            'https://6.ipw.cn/api/ip/myip?json',
+            'https://v6.ident.me/.json',
+          ]
         : [
+            // 多套出口 IP 查询源，任意一个成功即返回；顺序即优先级。
             'https://api.ip.sb/geoip',
-            'https://ipapi.co/json',
             'https://ipwho.is/',
+            'https://ipapi.co/json',
+            'https://api.ipapi.is/',
+            'https://ip.api.skk.moe/cf-geoip',
+            'https://get.geojs.io/v1/ip/geo.json',
           ]
       for (const url of endpoints) {
         try {
@@ -1450,13 +1468,21 @@ const HomePage = () => {
           clearTimeout(t)
           if (!res.ok) continue
           const d = (await res.json()) as Record<string, unknown>
+          // 不同服务字段名各异，做一层宽松提取（含 location 嵌套）。
+          const loc = (d.location ?? {}) as Record<string, unknown>
           const ip = String(d.ip ?? d.IP ?? '')
           if (!ip) continue
-          return {
-            ip,
-            cc: String(d.country_code ?? d.country ?? '').toUpperCase(),
-            country: String(d.country ?? d.country_name ?? ''),
-          }
+          const cc = String(
+            d.country_code ??
+              d.country ??
+              loc.country_code ??
+              loc.country ??
+              '',
+          ).toUpperCase()
+          const country = String(
+            d.country_name ?? d.country ?? loc.country ?? '',
+          )
+          return { ip, cc, country }
         } catch {
           // 试下一个
         }
@@ -1478,6 +1504,12 @@ const HomePage = () => {
       { key: 'proxymode', label: '代理模式', status: 'pending', detail: '检测中…' },
       { key: 'node', label: '节点连通', status: 'pending', detail: '检测中…' },
       { key: 'lan', label: '本地网络', status: 'pending', detail: '检测中…' },
+      {
+        key: 'lanaccess',
+        label: '局域网访问',
+        status: 'pending',
+        detail: '检测中…',
+      },
       { key: 'domestic', label: '国内站点', status: 'pending', detail: '检测中…' },
       { key: 'external', label: '国外站点', status: 'pending', detail: '检测中…' },
       { key: 'ipv6', label: 'IPv6 连通', status: 'pending', detail: '检测中…' },
@@ -1678,6 +1710,21 @@ const HomePage = () => {
       await patchClashMode('rule').catch(() => {})
       await restartCore()
       await refreshClashConfig?.().catch(() => {})
+    }
+
+    // 局域网访问：是否允许同网段设备连接本机代理，并给出可用端口，方便手动填代理。
+    if (allowLanOn) {
+      set('lanaccess', 'ok', `已开启 · ${lanPortHint}`)
+    } else {
+      set(
+        'lanaccess',
+        'warn',
+        `未开启（仅本机可用）· ${lanPortHint}`,
+        async () => {
+          await patchClash({ 'allow-lan': true })
+        },
+        '开启局域网',
+      )
     }
 
     // 本地网络：直连国内站点（不走代理），验证机器本身有网
@@ -2685,7 +2732,9 @@ const HomePage = () => {
                   {
                     icon: <LanRounded sx={{ color: '#12a87f' }} />,
                     title: '局域网连接',
-                    desc: '允许同一局域网设备连接本机代理。',
+                    desc: allowLanOn
+                      ? `已允许同局域网设备连接本机代理 · ${lanPortHint}`
+                      : `允许同一局域网设备连接本机代理。开启后可用：${lanPortHint}`,
                     checked: allowLanOn,
                     onChange: toggleAllowLan,
                   },

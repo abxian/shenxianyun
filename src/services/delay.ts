@@ -109,7 +109,8 @@ class DelayManager {
       `[DelayManager] 获取测试URL，组: ${group}, URL: ${url || '未设置'}`,
     )
     // 如果未设置URL，返回默认URL
-    return url || 'http://cp.cloudflare.com/generate_204'
+    // 用 gstatic 的 HTTPS 204：明文 http cloudflare 端点常被限速/挂起，造成假超时。
+    return url || 'https://www.gstatic.com/generate_204'
   }
 
   setListener(
@@ -217,8 +218,10 @@ class DelayManager {
       debugLog(`[DelayManager] 调用API测试延迟，代理: ${name}, URL: ${url}`)
 
       // 设置超时处理, delay = 0 为超时
+      // 给内核多留 2s 缓冲：内核自身已按 timeout 计时，若 JS 定时器在边界处抢先
+      // resolve，会把其实已测出结果的可用节点误报成“超时”。让内核结果优先。
       const timeoutPromise = new Promise<ProxyDelay>((resolve) => {
-        setTimeout(() => resolve({ delay: 0 }), timeout)
+        setTimeout(() => resolve({ delay: 0 }), timeout + 2000)
       })
 
       // 使用Promise.race来实现超时控制
