@@ -74,9 +74,14 @@ import {
 } from '@/services/cmds'
 import { EditorViewer } from '@/components/profile/editor-viewer'
 import delayManager from '@/services/delay'
+import {
+  getApiBase,
+  initEndpointDiscovery,
+  officialDirectRules,
+  rotateApiBase,
+} from '@/services/endpoint-resolver'
 import getSystem from '@/utils/get-system'
 
-const SUBSCRIPTION_BASE_URL = 'https://sub.jc116.com'
 const CODE_STORAGE_KEY = 'shenxianyun.accessCode'
 const CODE_EXPIRES_STORAGE_KEY = 'shenxianyun.accessExpiresAt'
 const CODE_UPDATE_VERSION_STORAGE_KEY = 'shenxianyun.updateVersion'
@@ -112,12 +117,12 @@ const buildExpiredProfileYaml = () =>
         proxies: [EXPIRED_NODE_NAME],
       },
     ],
-    // 订阅/续费域名走直连，保证续费页可访问、占位期间仍能探测到续费并自动恢复；
-    // 其余流量全部走不可达的占位节点（无法上网）。
-    rules: ['DOMAIN-SUFFIX,jc116.com,DIRECT', 'MATCH,节点选择'],
+    // 订阅/续费域名走直连（含发现到的所有官方域名），保证续费页可访问、
+    // 占位期间仍能探测到续费并自动恢复；其余流量全部走不可达的占位节点（无法上网）。
+    rules: [...officialDirectRules(), 'MATCH,节点选择'],
   })
-const DESKTOP_VERSION = '2.4.9'
-const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.4.9'
+const DESKTOP_VERSION = '2.5.17'
+const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.17'
 const DESKTOP_PLATFORM = getSystem()
 const fieldSx = {
   '& .MuiInputLabel-root': {
@@ -630,7 +635,7 @@ const HomePage = () => {
     })
     if (countImport) params.set('import', '1')
     const response = await tauriFetch(
-      `${SUBSCRIPTION_BASE_URL}/api/verify/${encodeURIComponent(input)}?${params.toString()}`,
+      `${getApiBase()}/api/verify/${encodeURIComponent(input)}?${params.toString()}`,
       {
         method: 'GET',
         connectTimeout: 8000,
@@ -654,7 +659,7 @@ const HomePage = () => {
         client_id: getClientId(),
       })
       const response = await tauriFetch(
-        `${SUBSCRIPTION_BASE_URL}/api/update-state/${encodeURIComponent(input)}?${params.toString()}`,
+        `${getApiBase()}/api/update-state/${encodeURIComponent(input)}?${params.toString()}`,
         {
           method: 'GET',
           connectTimeout: 8000,
@@ -679,7 +684,7 @@ const HomePage = () => {
 
   const checkDesktopUpdate = useCallback(async () => {
     const response = await tauriFetch(
-      `${SUBSCRIPTION_BASE_URL}/api/desktop-version?platform=${encodeURIComponent(DESKTOP_PLATFORM)}`,
+      `${getApiBase()}/api/desktop-version?platform=${encodeURIComponent(DESKTOP_PLATFORM)}`,
       {
         method: 'GET',
         connectTimeout: 8000,
@@ -732,11 +737,11 @@ const HomePage = () => {
         client_id: getClientId(),
         platform: 'Windows电脑',
         app_name: '神仙云桌面端',
-        app_version: '2.4.9',
+        app_version: '2.5.17',
         device_name: navigator.userAgent,
       })
       await tauriFetch(
-        `${SUBSCRIPTION_BASE_URL}/api/client/${endpoint}/${encodeURIComponent(value)}?${params.toString()}`,
+        `${getApiBase()}/api/client/${endpoint}/${encodeURIComponent(value)}?${params.toString()}`,
         {
           method: 'GET',
           connectTimeout: 5000,
@@ -777,7 +782,7 @@ const HomePage = () => {
     }
 
     await tauriFetch(
-      `${SUBSCRIPTION_BASE_URL}/api/client/traffic/${encodeURIComponent(value)}`,
+      `${getApiBase()}/api/client/traffic/${encodeURIComponent(value)}`,
       {
         method: 'POST',
         connectTimeout: 5000,
@@ -791,7 +796,7 @@ const HomePage = () => {
           client_id: getClientId(),
           platform: 'Windows电脑',
           app_name: '神仙云桌面端',
-          app_version: '2.4.9',
+          app_version: '2.5.17',
           device_name: navigator.userAgent,
           upload_bytes: uploadDelta,
           download_bytes: downloadDelta,
@@ -860,6 +865,8 @@ const HomePage = () => {
       } catch (error) {
         lastError = error
         if (attempt < retryCount) {
+          // 重试前尝试切换到下一条可用 API 线路（当前线路可能已失联）。
+          await rotateApiBase().catch(() => undefined)
           setStatus(`订阅失败，正在重试 ${attempt}/${retryCount - 1}...`)
           await new Promise((resolve) => setTimeout(resolve, 1000 * attempt))
         }
@@ -968,6 +975,12 @@ const HomePage = () => {
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 60_000)
     return () => window.clearInterval(timer)
+  }, [])
+
+  // 端点发现：启动时后台拉取 endpoints.json 并探测可用 API 基址。
+  // 失败静默（用缓存/内置默认兜底），不阻塞任何功能。
+  useEffect(() => {
+    initEndpointDiscovery().catch(() => undefined)
   }, [])
 
   useEffect(() => {
@@ -1100,6 +1113,8 @@ const HomePage = () => {
         failures = 0
       } catch {
         failures = Math.min(failures + 1, 4)
+        // 网络失败可能是当前 API 线路失联，后台切换到下一条候选线路。
+        rotateApiBase().catch(() => undefined)
       } finally {
         updateInFlightRef.current = false
       }
@@ -1437,6 +1452,52 @@ const HomePage = () => {
     },
     [proxyUrl],
   )
+
+  // 覆盖安装自愈：升级/覆盖安装后常见「系统代理已开但内核未真正就绪」→ 全系统断网。
+  // 启动后延迟探测：系统代理已配置但经核心端口出不了网 → 自动重启内核并重设系统代理；
+  // 仍不通则先关闭系统代理保住本机上网，提示用户自检。只在启动后自动执行一次。
+  const selfHealRanRef = useRef(false)
+  useEffect(() => {
+    if (selfHealRanRef.current) return
+    // TUN 模式流量不走系统代理，另有自检覆盖；未配置系统代理则无残留可修。
+    if (!systemProxyConfigOn || tunOn) return
+    selfHealRanRef.current = true
+
+    const timer = window.setTimeout(async () => {
+      // 国内 + 国外各探一次，任一通过则认为核心端口健康（避免单节点抖动误判）。
+      const portAlive = async () =>
+        (await probe('https://www.baidu.com', true, 8000)) ||
+        (await probe('https://www.gstatic.com/generate_204', true, 8000))
+
+      if (await portAlive()) return
+
+      setStatus('检测到系统代理异常（常见于覆盖安装后），正在自动修复...')
+      await restartCore().catch(() => {})
+      await toggleSystemProxy(false).catch(() => {})
+      await toggleSystemProxy(true).catch(() => {})
+      await invalidateProxyState().catch(() => {})
+
+      if (await portAlive()) {
+        setStatus('系统代理已自动修复')
+        await refreshAll().catch(() => {})
+        return
+      }
+
+      // 修不好：先把系统代理关掉，把上网能力还给用户，再引导自检。
+      await toggleSystemProxy(false).catch(() => {})
+      await invalidateProxyState().catch(() => {})
+      setStatus('代理端口不通，已暂时关闭系统代理恢复上网；请点「一键自检」排查或彻底重置')
+    }, 3000)
+
+    return () => window.clearTimeout(timer)
+  }, [
+    systemProxyConfigOn,
+    tunOn,
+    probe,
+    toggleSystemProxy,
+    invalidateProxyState,
+    refreshAll,
+  ])
 
   // 取出口 IP / 国家；viaProxy=true 反映节点出口，false 反映本地直连出口。
   const fetchEgress = useCallback(
@@ -2492,8 +2553,8 @@ const HomePage = () => {
                       sx={{ flex: '1 1 96px' }}
                       onClick={() => {
                         const url = savedCode
-                          ? `${SUBSCRIPTION_BASE_URL}/pay?action=renew&code=${encodeURIComponent(savedCode)}`
-                          : `${SUBSCRIPTION_BASE_URL}/pay?action=new`
+                          ? `${getApiBase()}/pay?action=renew&code=${encodeURIComponent(savedCode)}`
+                          : `${getApiBase()}/pay?action=new`
                         openWebUrl(url)
                       }}
                     >
@@ -3484,7 +3545,7 @@ const HomePage = () => {
                 variant="contained"
                 onClick={() => {
                   openWebUrl(
-                    `${SUBSCRIPTION_BASE_URL}/pay?action=renew&code=${encodeURIComponent(savedCode)}`,
+                    `${getApiBase()}/pay?action=renew&code=${encodeURIComponent(savedCode)}`,
                   ).catch(() => undefined)
                 }}
                 sx={{
