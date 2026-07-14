@@ -124,8 +124,8 @@ const buildExpiredProfileYaml = () =>
     // 占位期间仍能探测到续费并自动恢复；其余流量全部走不可达的占位节点（无法上网）。
     rules: [...officialDirectRules(), 'MATCH,节点选择'],
   })
-const DESKTOP_VERSION = '2.5.19'
-const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.19'
+const DESKTOP_VERSION = '2.5.20'
+const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.20'
 const DESKTOP_PLATFORM = getSystem()
 const fieldSx = {
   '& .MuiInputLabel-root': {
@@ -740,7 +740,7 @@ const HomePage = () => {
         client_id: getClientId(),
         platform: 'Windows电脑',
         app_name: '神仙云桌面端',
-        app_version: '2.5.19',
+        app_version: '2.5.20',
         device_name: navigator.userAgent,
       })
       await tauriFetch(
@@ -799,7 +799,7 @@ const HomePage = () => {
           client_id: getClientId(),
           platform: 'Windows电脑',
           app_name: '神仙云桌面端',
-          app_version: '2.5.19',
+          app_version: '2.5.20',
           device_name: navigator.userAgent,
           upload_bytes: uploadDelta,
           download_bytes: downloadDelta,
@@ -1001,15 +1001,15 @@ const HomePage = () => {
   }, [])
 
   const switchLine = useLockFn(async (base: string, index: number) => {
-    setStatus(`正在测试线路${index + 1}...`)
+    setStatus(`正在测试神仙云${index + 1}...`)
     const ok = await probeApiBase(base)
     setLines((prev) => prev.map((l) => (l.base === base ? { ...l, ok } : l)))
     if (ok) {
       setActiveApiBase(base)
       setActiveLine(base)
-      setStatus(`已切换到线路${index + 1}`)
+      setStatus(`已切换到神仙云${index + 1}`)
     } else {
-      setStatus(`线路${index + 1}不通，未切换`)
+      setStatus(`神仙云${index + 1}不通，未切换`)
     }
   })
 
@@ -1021,6 +1021,20 @@ const HomePage = () => {
       .finally(() => {
         refreshLines().catch(() => undefined)
       })
+    // 启动瞬间核心/系统代理可能未就绪，10 秒后快速复测一次，尽快纠正误报
+    const quick = window.setTimeout(() => {
+      refreshLines().catch(() => undefined)
+    }, 10_000)
+    return () => window.clearTimeout(quick)
+  }, [refreshLines])
+
+  // 线路状态周期性重测：启动瞬间核心/系统代理可能未就绪导致误报「不通」，
+  // 每 60 秒自动重探一轮，状态始终反映当前真实连通性。
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      refreshLines().catch(() => undefined)
+    }, 60_000)
+    return () => window.clearInterval(timer)
   }, [refreshLines])
 
   // 自动切换（rotate）后让线路条跟着变
@@ -2300,8 +2314,7 @@ const HomePage = () => {
                     size="small"
                     clickable
                     onClick={() => switchLine(l.base, i)}
-                    title={l.base}
-                    label={`线路${i + 1}${
+                    label={`神仙云${i + 1}${
                       l.ok === null ? ' …' : l.ok ? '' : ' ✕'
                     }`}
                     color={isActive ? 'success' : 'default'}
