@@ -340,6 +340,11 @@ async function publishToDufs(updateData) {
     ).toString('base64')
 
   const dufsData = JSON.parse(JSON.stringify(updateData))
+  // dufs 不会在 PUT 时自动创建子目录，先 MKCOL 确保 /updater/ 存在（已存在时 405，忽略）
+  await fetch(`${base}/updater`, {
+    method: 'MKCOL',
+    headers: { Authorization: auth },
+  }).catch(() => {})
   // 同一文件(多平台复用同一 url)只搬运一次
   const uploaded = new Map()
   for (const [key, value] of Object.entries(dufsData.platforms)) {
