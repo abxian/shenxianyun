@@ -77,6 +77,7 @@ import { EditorViewer } from '@/components/profile/editor-viewer'
 import delayManager from '@/services/delay'
 import {
   getApiBase,
+  getBootstrapProxy,
   initEndpointDiscovery,
   listApiBases,
   officialDirectRules,
@@ -630,8 +631,8 @@ const HomePage = () => {
     ].filter((value): value is string => Boolean(value))
     return Array.from(new Set(values))
   }, [nodes, primaryGroup?.name, selectedNode])
-  // 统一的 API 请求：先本机直连；直连报网络错误且内核在跑时，经内核端口重试一次。
-  // 解决系统级 OpenClash/fake-ip 把自家 web 误路由/劫持导致直连打不通的问题。
+  // 统一的 API 请求兜底链：直连 → 内核端口/系统代理 → 后台配置的兜底代理。
+  // 逐层重试，解决 OpenClash/fake-ip 误路由、首装用户连不上 web 验证提取码的问题。
   const apiFetch = async (
     url: string,
     init: Parameters<typeof tauriFetch>[1],
@@ -639,8 +640,20 @@ const HomePage = () => {
     try {
       return await tauriFetch(url, init)
     } catch (err) {
+      // 第 2 层：内核混合端口（在跑时）或系统代理
       const p = proxyUrlRef.current
-      if (p) return await tauriFetch(url, { ...init, proxy: { all: p } })
+      if (p) {
+        try {
+          return await tauriFetch(url, { ...init, proxy: { all: p } })
+        } catch {
+          // 落到第 3 层
+        }
+      }
+      // 第 3 层：后台下发的兜底代理（bootstrap_proxy），最后一条路
+      const boot = getBootstrapProxy()
+      if (boot && boot !== p) {
+        return await tauriFetch(url, { ...init, proxy: { all: boot } })
+      }
       throw err
     }
   }

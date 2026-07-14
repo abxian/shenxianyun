@@ -33,6 +33,7 @@ export type Endpoints = {
   api_bases?: string[]
   sub_base?: string
   download_base?: string
+  bootstrap_proxy?: string
   updated_at?: string
 }
 
@@ -40,6 +41,13 @@ const normalizeBase = (value: unknown): string => {
   if (typeof value !== 'string') return ''
   const v = value.trim().replace(/\/+$/, '')
   return /^https?:\/\//.test(v) ? v : ''
+}
+
+// 兜底代理：允许 http/socks5 URL；不像 base 那样去尾斜杠。
+const normalizeProxy = (value: unknown): string => {
+  if (typeof value !== 'string') return ''
+  const v = value.trim()
+  return /^(https?|socks5h?):\/\//.test(v) ? v : ''
 }
 
 const sanitize = (data: unknown): Endpoints | null => {
@@ -54,6 +62,7 @@ const sanitize = (data: unknown): Endpoints | null => {
     api_bases: bases,
     sub_base: normalizeBase(raw.sub_base),
     download_base: normalizeBase(raw.download_base),
+    bootstrap_proxy: normalizeProxy(raw.bootstrap_proxy),
     updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : '',
   }
 }
@@ -76,6 +85,10 @@ export const getApiBase = (): string => {
 }
 
 export const getEndpoints = (): Endpoints | null => readCache()
+
+/** 兜底代理（HTTP/SOCKS5）：直连+系统代理都连不上 web 时的最后一条路。无则空串。 */
+export const getBootstrapProxy = (): string =>
+  normalizeProxy(readCache()?.bootstrap_proxy)
 
 /** 拉取发现源（依次尝试，8s 超时），成功则缓存。失败静默返回缓存/null。 */
 export const refreshEndpoints = async (): Promise<Endpoints | null> => {
@@ -127,6 +140,9 @@ const reachable = async (base: string, proxyUrl?: string): Promise<boolean> => {
   const url = `${base}/api/app-version`
   if (await probeOnce(url, undefined, 7000)) return true
   if (proxyUrl && (await probeOnce(url, proxyUrl, 7000))) return true
+  // 最后一档：后台下发的兜底代理
+  const boot = getBootstrapProxy()
+  if (boot && boot !== proxyUrl && (await probeOnce(url, boot, 7000))) return true
   return false
 }
 
