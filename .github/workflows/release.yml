@@ -638,6 +638,10 @@ jobs:
         run: pnpm updater
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 自有 dufs 第一更新通道：更新包与 update.json 自动发布到 dufs
+          DUFS_BASE: ${{ secrets.DUFS_BASE }}
+          DUFS_USER: ${{ secrets.DUFS_USER }}
+          DUFS_PASS: ${{ secrets.DUFS_PASS }}
 
   release-update-for-fixed-webview2:
     if: ${{ !contains(github.ref_name, '-rc') }}

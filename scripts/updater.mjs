@@ -292,6 +292,13 @@ async function processRelease(github, options, tag, isAlpha) {
       console.log(
         `Successfully uploaded ${isAlpha ? 'alpha' : 'stable'} update files to ${releaseTag}`,
       )
+
+      // 自有 dufs 是第一更新通道：把更新包搬运到 dufs 并发布 update.json（仅稳定版）
+      if (!isAlpha) {
+        await publishToDufs(updateData).catch((err) =>
+          console.error('[dufs] publish failed:', err.message),
+        )
+      }
     } catch (error) {
       console.error(
         `Failed to process ${isAlpha ? 'alpha' : 'stable'} release:`,
@@ -315,6 +322,62 @@ async function getSignature(url) {
   })
 
   return response.text()
+}
+
+// ===== 发布到自有 dufs：国内直连的第一更新通道，不依赖 GitHub / 第三方加速 =====
+// 把各平台更新包从 GitHub 搬运到 dufs /updater/ 下，并生成指向 dufs 的 update.json。
+// 需要仓库 secrets：DUFS_BASE（如 http://114.80.36.225:5011/sxy）、DUFS_USER、DUFS_PASS。
+async function publishToDufs(updateData) {
+  const base = (process.env.DUFS_BASE || '').replace(/\/+$/, '')
+  if (!base) {
+    console.log('[dufs] DUFS_BASE not set, skip dufs publish')
+    return
+  }
+  const auth =
+    'Basic ' +
+    Buffer.from(
+      `${process.env.DUFS_USER || ''}:${process.env.DUFS_PASS || ''}`,
+    ).toString('base64')
+
+  const dufsData = JSON.parse(JSON.stringify(updateData))
+  // 同一文件(多平台复用同一 url)只搬运一次
+  const uploaded = new Map()
+  for (const [key, value] of Object.entries(dufsData.platforms)) {
+    if (!value.url) continue
+    const filename = decodeURIComponent(value.url.split('/').pop())
+    const target = `${base}/updater/${encodeURIComponent(filename)}`
+    if (uploaded.has(value.url)) {
+      if (uploaded.get(value.url)) value.url = target
+      continue
+    }
+    try {
+      const res = await fetch(value.url)
+      if (!res.ok) {
+        console.log(`[dufs] download ${filename} failed: HTTP ${res.status}`)
+        uploaded.set(value.url, false)
+        continue
+      }
+      const buf = Buffer.from(await res.arrayBuffer())
+      const put = await fetch(target, {
+        method: 'PUT',
+        headers: { Authorization: auth },
+        body: buf,
+      })
+      console.log(`[dufs] ${key}: ${filename} -> HTTP ${put.status}`)
+      uploaded.set(value.url, put.ok)
+      if (put.ok) value.url = target
+    } catch (err) {
+      console.log(`[dufs] ${filename} error: ${err.message}`)
+      uploaded.set(value.url, false)
+    }
+  }
+
+  const putJson = await fetch(`${base}/update.json`, {
+    method: 'PUT',
+    headers: { Authorization: auth, 'Content-Type': 'application/json' },
+    body: JSON.stringify(dufsData, null, 2),
+  })
+  console.log(`[dufs] update.json -> HTTP ${putJson.status}`)
 }
 
 resolveUpdater().catch(console.error)
