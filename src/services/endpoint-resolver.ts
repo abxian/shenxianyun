@@ -9,12 +9,19 @@ import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
  */
 
 // 内置兜底默认值（发现源全挂时最后的锚点）
-export const DEFAULT_API_BASE = 'https://sub.jc116.com'
+export const DEFAULT_API_BASE = 'https://sxnn.de'
+// 发现失败时的内置候选（按序探测），避免单个默认域名挂掉即全灭。
+export const BUILTIN_API_BASES = [
+  'https://sxnn.de',
+  'http://114.80.36.225:5010',
+  'https://sub.jc116.com',
+]
 
-// 静态发现锚点（互为备份）。注意 sxnn.de 是 app 反代域名，走 /api/endpoints 动态兜底。
+// 发现锚点：第一个是 web 后台「保存并发布」自动上传的 endpoints.json（唯一真源，dufs），
+// 后两个是备份（GitHub 手动同步、app 动态接口）。
 const DISCOVERY_URLS = [
-  'https://raw.githubusercontent.com/abxian/shenxianyun-config/main/endpoints.json',
   'http://114.80.36.225:5011/endpoints.json',
+  'https://raw.githubusercontent.com/abxian/shenxianyun-config/main/endpoints.json',
   'https://sxnn.de/api/endpoints',
 ]
 
@@ -95,7 +102,7 @@ export const refreshEndpoints = async (): Promise<Endpoints | null> => {
 export const pickApiBase = async (): Promise<string> => {
   const bases = readCache()?.api_bases?.length
     ? (readCache()?.api_bases as string[])
-    : [DEFAULT_API_BASE]
+    : BUILTIN_API_BASES
   for (const base of bases) {
     try {
       const ctrl = new AbortController()
@@ -119,7 +126,9 @@ export const pickApiBase = async (): Promise<string> => {
 /** 请求失败时调用：把当前 active 基址作废并顺延到下一个候选，返回新基址。 */
 export const rotateApiBase = async (): Promise<string> => {
   const bad = getApiBase()
-  const bases = readCache()?.api_bases ?? [DEFAULT_API_BASE]
+  const bases = readCache()?.api_bases?.length
+    ? (readCache()?.api_bases as string[])
+    : BUILTIN_API_BASES
   const rest = bases.filter((b) => b !== bad)
   for (const base of rest) {
     try {
