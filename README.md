@@ -160,7 +160,7 @@ Action 跑完后到本仓库 Release `v<版本号>` 页面下载（`<ver>` 为�
 
 ### 四、重命名后上传到 dufs 分发服务
 
-分发服务器：**<http://114.80.36.225:15667/shenxianyun/>**（dufs，支持 WebDAV PUT）。
+分发服务器：**<http://114.80.36.225:5011/sxy/>**（dufs，支持 WebDAV PUT）。
 下载到的安装包按下表**重命名为固定名称**（用户/后台始终按固定名下载），再用 `curl -T`（PUT）上传：
 
 | 固定分发名 | 来源产物 |
@@ -171,13 +171,13 @@ Action 跑完后到本仓库 Release `v<版本号>` 页面下载（`<ver>` 为�
 | `神仙云.rpm` | `Clash.Verge-<ver>-1.x86_64.rpm` |
 
 ```bash
-DUFS=http://114.80.36.225:15667/shenxianyun
+DUFS=http://114.80.36.225:5011/sxy
 # 先把下载的安装包重命名为固定名，再 PUT 上传（覆盖同名文件）
 curl -T 神仙云.exe "$DUFS/神仙云.exe"
 curl -T 神仙云.dmg "$DUFS/神仙云.dmg"
 curl -T 神仙云.deb "$DUFS/神仙云.deb"
 curl -T 神仙云.rpm "$DUFS/神仙云.rpm"
-# 若 dufs 开启了鉴权，加 -u 用户名:密码
+# dufs 上传需鉴权：-u shenxianyun:shenxianyun@123（匿名只读）
 # curl -u user:pass -T 神仙云.exe "$DUFS/神仙云.exe"
 ```
 
