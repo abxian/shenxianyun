@@ -77,8 +77,11 @@ import delayManager from '@/services/delay'
 import {
   getApiBase,
   initEndpointDiscovery,
+  listApiBases,
   officialDirectRules,
+  probeApiBase,
   rotateApiBase,
+  setActiveApiBase,
 } from '@/services/endpoint-resolver'
 import getSystem from '@/utils/get-system'
 
@@ -977,11 +980,53 @@ const HomePage = () => {
     return () => window.clearInterval(timer)
   }, [])
 
+  // ===== 线路（web/api_bases 地址）状态条：显示线路1/2/3 连通状态，自动选可用，可手动点选 =====
+  const [lines, setLines] = useState<{ base: string; ok: boolean | null }[]>([])
+  const [activeLine, setActiveLine] = useState('')
+
+  const refreshLines = useCallback(async () => {
+    const bases = listApiBases()
+    setLines(bases.map((base) => ({ base, ok: null })))
+    setActiveLine(getApiBase())
+    await Promise.all(
+      bases.map(async (base) => {
+        const ok = await probeApiBase(base)
+        setLines((prev) =>
+          prev.map((l) => (l.base === base ? { ...l, ok } : l)),
+        )
+      }),
+    )
+    // 探测完成后再同步一次（发现/自动切换可能改了 active）
+    setActiveLine(getApiBase())
+  }, [])
+
+  const switchLine = useLockFn(async (base: string, index: number) => {
+    setStatus(`正在测试线路${index + 1}...`)
+    const ok = await probeApiBase(base)
+    setLines((prev) => prev.map((l) => (l.base === base ? { ...l, ok } : l)))
+    if (ok) {
+      setActiveApiBase(base)
+      setActiveLine(base)
+      setStatus(`已切换到线路${index + 1}`)
+    } else {
+      setStatus(`线路${index + 1}不通，未切换`)
+    }
+  })
+
   // 端点发现：启动时后台拉取 endpoints.json 并探测可用 API 基址。
   // 失败静默（用缓存/内置默认兜底），不阻塞任何功能。
   useEffect(() => {
-    initEndpointDiscovery().catch(() => undefined)
-  }, [])
+    initEndpointDiscovery()
+      .catch(() => undefined)
+      .finally(() => {
+        refreshLines().catch(() => undefined)
+      })
+  }, [refreshLines])
+
+  // 自动切换（rotate）后让线路条跟着变
+  useEffect(() => {
+    setActiveLine(getApiBase())
+  }, [nowMs])
 
   useEffect(() => {
     // jc116 桌面版本检查已停用，改用 Tauri updater（GitHub releases 签名自动更新）
@@ -2230,6 +2275,59 @@ const HomePage = () => {
               />
             </Stack>
           </Stack>
+
+          {lines.length > 0 && (
+            <Stack
+              direction="row"
+              spacing={0.75}
+              useFlexGap
+              sx={{ flexWrap: 'wrap', alignItems: 'center' }}
+            >
+              <Typography
+                sx={{
+                  fontSize: 12,
+                  fontWeight: 800,
+                  color: 'rgba(226,236,250,.78)',
+                }}
+              >
+                服务线路
+              </Typography>
+              {lines.map((l, i) => {
+                const isActive = activeLine === l.base
+                return (
+                  <Chip
+                    key={l.base}
+                    size="small"
+                    clickable
+                    onClick={() => switchLine(l.base, i)}
+                    title={l.base}
+                    label={`线路${i + 1}${
+                      l.ok === null ? ' …' : l.ok ? '' : ' ✕'
+                    }`}
+                    color={isActive ? 'success' : 'default'}
+                    variant={isActive ? 'filled' : 'outlined'}
+                    sx={{
+                      fontWeight: 700,
+                      ...(isActive
+                        ? {}
+                        : {
+                            color:
+                              l.ok === false
+                                ? 'rgba(226,236,250,.45)'
+                                : 'rgba(226,236,250,.88)',
+                            borderColor: 'rgba(255,255,255,.32)',
+                          }),
+                    }}
+                  />
+                )
+              })}
+              <Typography
+                sx={{ fontSize: 11, color: 'rgba(226,236,250,.55)' }}
+              >
+                自动选择可用线路，可点选切换
+              </Typography>
+            </Stack>
+          )}
 
           <Paper
             elevation={0}

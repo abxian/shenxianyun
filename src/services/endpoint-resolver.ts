@@ -123,6 +123,34 @@ export const pickApiBase = async (): Promise<string> => {
   return getApiBase()
 }
 
+/** 当前全部候选线路（发现缓存优先，否则内置列表）。 */
+export const listApiBases = (): string[] => {
+  const cached = readCache()?.api_bases
+  return cached?.length ? cached : BUILTIN_API_BASES
+}
+
+/** 探测单条线路是否可用（GET /api/app-version，5s 超时）。 */
+export const probeApiBase = async (base: string): Promise<boolean> => {
+  try {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), 5000)
+    const res = await tauriFetch(`${base}/api/app-version`, {
+      method: 'GET',
+      signal: ctrl.signal,
+    })
+    clearTimeout(t)
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** 手动指定当前线路（页面上点选线路时用）。 */
+export const setActiveApiBase = (base: string): void => {
+  const v = normalizeBase(base)
+  if (v) localStorage.setItem(ACTIVE_BASE_KEY, v)
+}
+
 /** 请求失败时调用：把当前 active 基址作废并顺延到下一个候选，返回新基址。 */
 export const rotateApiBase = async (): Promise<string> => {
   const bad = getApiBase()
