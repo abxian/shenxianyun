@@ -58,6 +58,7 @@ import {
   createProfile,
   enhanceProfiles,
   getProfiles,
+  getSystemProxy,
   importProfile,
   installService,
   openWebUrl,
@@ -124,8 +125,8 @@ const buildExpiredProfileYaml = () =>
     // 占位期间仍能探测到续费并自动恢复；其余流量全部走不可达的占位节点（无法上网）。
     rules: [...officialDirectRules(), 'MATCH,节点选择'],
   })
-const DESKTOP_VERSION = '2.5.20'
-const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.20'
+const DESKTOP_VERSION = '2.5.21'
+const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.21'
 const DESKTOP_PLATFORM = getSystem()
 const fieldSx = {
   '& .MuiInputLabel-root': {
@@ -629,6 +630,21 @@ const HomePage = () => {
     ].filter((value): value is string => Boolean(value))
     return Array.from(new Set(values))
   }, [nodes, primaryGroup?.name, selectedNode])
+  // 统一的 API 请求：先本机直连；直连报网络错误且内核在跑时，经内核端口重试一次。
+  // 解决系统级 OpenClash/fake-ip 把自家 web 误路由/劫持导致直连打不通的问题。
+  const apiFetch = async (
+    url: string,
+    init: Parameters<typeof tauriFetch>[1],
+  ): ReturnType<typeof tauriFetch> => {
+    try {
+      return await tauriFetch(url, init)
+    } catch (err) {
+      const p = proxyUrlRef.current
+      if (p) return await tauriFetch(url, { ...init, proxy: { all: p } })
+      throw err
+    }
+  }
+
   const verifyCode = async (
     input: string,
     countImport = true,
@@ -637,7 +653,7 @@ const HomePage = () => {
       client_id: getClientId(),
     })
     if (countImport) params.set('import', '1')
-    const response = await tauriFetch(
+    const response = await apiFetch(
       `${getApiBase()}/api/verify/${encodeURIComponent(input)}?${params.toString()}`,
       {
         method: 'GET',
@@ -661,7 +677,7 @@ const HomePage = () => {
       const params = new URLSearchParams({
         client_id: getClientId(),
       })
-      const response = await tauriFetch(
+      const response = await apiFetch(
         `${getApiBase()}/api/update-state/${encodeURIComponent(input)}?${params.toString()}`,
         {
           method: 'GET',
@@ -740,7 +756,7 @@ const HomePage = () => {
         client_id: getClientId(),
         platform: 'Windows电脑',
         app_name: '神仙云桌面端',
-        app_version: '2.5.20',
+        app_version: '2.5.21',
         device_name: navigator.userAgent,
       })
       await tauriFetch(
@@ -799,7 +815,7 @@ const HomePage = () => {
           client_id: getClientId(),
           platform: 'Windows电脑',
           app_name: '神仙云桌面端',
-          app_version: '2.5.20',
+          app_version: '2.5.21',
           device_name: navigator.userAgent,
           upload_bytes: uploadDelta,
           download_bytes: downloadDelta,
@@ -869,7 +885,7 @@ const HomePage = () => {
         lastError = error
         if (attempt < retryCount) {
           // 重试前尝试切换到下一条可用 API 线路（当前线路可能已失联）。
-          await rotateApiBase().catch(() => undefined)
+          await rotateApiBase(proxyUrlRef.current || undefined).catch(() => undefined)
           setStatus(`订阅失败，正在重试 ${attempt}/${retryCount - 1}...`)
           await new Promise((resolve) => setTimeout(resolve, 1000 * attempt))
         }
@@ -983,6 +999,8 @@ const HomePage = () => {
   // ===== 线路（web/api_bases 地址）状态条：显示线路1/2/3 连通状态，自动选可用，可手动点选 =====
   const [lines, setLines] = useState<{ base: string; ok: boolean | null }[]>([])
   const [activeLine, setActiveLine] = useState('')
+  // 内核混合端口的代理地址，随时更新；探测/验证直连失败时经它兜底出网。
+  const proxyUrlRef = useRef('')
 
   const refreshLines = useCallback(async () => {
     const bases = listApiBases()
@@ -990,7 +1008,7 @@ const HomePage = () => {
     setActiveLine(getApiBase())
     await Promise.all(
       bases.map(async (base) => {
-        const ok = await probeApiBase(base)
+        const ok = await probeApiBase(base, proxyUrlRef.current || undefined)
         setLines((prev) =>
           prev.map((l) => (l.base === base ? { ...l, ok } : l)),
         )
@@ -1002,7 +1020,7 @@ const HomePage = () => {
 
   const switchLine = useLockFn(async (base: string, index: number) => {
     setStatus(`正在测试神仙云${index + 1}...`)
-    const ok = await probeApiBase(base)
+    const ok = await probeApiBase(base, proxyUrlRef.current || undefined)
     setLines((prev) => prev.map((l) => (l.base === base ? { ...l, ok } : l)))
     if (ok) {
       setActiveApiBase(base)
@@ -1016,7 +1034,7 @@ const HomePage = () => {
   // 端点发现：启动时后台拉取 endpoints.json 并探测可用 API 基址。
   // 失败静默（用缓存/内置默认兜底），不阻塞任何功能。
   useEffect(() => {
-    initEndpointDiscovery()
+    initEndpointDiscovery(proxyUrlRef.current || undefined)
       .catch(() => undefined)
       .finally(() => {
         refreshLines().catch(() => undefined)
@@ -1173,7 +1191,7 @@ const HomePage = () => {
       } catch {
         failures = Math.min(failures + 1, 4)
         // 网络失败可能是当前 API 线路失联，后台切换到下一条候选线路。
-        rotateApiBase().catch(() => undefined)
+        rotateApiBase(proxyUrlRef.current || undefined).catch(() => undefined)
       } finally {
         updateInFlightRef.current = false
       }
@@ -1479,6 +1497,36 @@ const HomePage = () => {
         (clashConfig as { port?: number } | undefined)?.port,
     ) || 7897
   const proxyUrl = `http://127.0.0.1:${mixedPort}`
+
+  // 探测/验证的「直连兜底代理」：
+  // - 内核在跑：用内核混合端口（内核带 sxnn.de/jc116.com 直连规则，最可靠）。
+  // - 内核没跑：回落到操作系统当前的系统代理（如用户在用 OpenClash 做系统代理），
+  //   让 App 像浏览器一样能出网，解决冷启动「一打开全不通」。
+  useEffect(() => {
+    let cancelled = false
+    const sync = async () => {
+      if (running) {
+        proxyUrlRef.current = proxyUrl
+        return
+      }
+      try {
+        const sp = await getSystemProxy()
+        // server 形如 "127.0.0.1:7890"；排除指向本核心自身的残留代理
+        if (sp?.enable && sp.server && !sp.server.startsWith('0.0.0.0')) {
+          const url = `http://${sp.server}`
+          if (!cancelled) proxyUrlRef.current = url === proxyUrl ? '' : url
+          return
+        }
+      } catch {
+        // 读不到就不用兜底代理
+      }
+      if (!cancelled) proxyUrlRef.current = ''
+    }
+    sync()
+    return () => {
+      cancelled = true
+    }
+  }, [running, proxyUrl])
 
   // 局域网端口提示：混合端口同时支持 HTTP/SOCKS；若单独开了 HTTP/SOCKS 端口也一并展示。
   const httpPort = verge?.verge_port
