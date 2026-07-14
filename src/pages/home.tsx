@@ -124,8 +124,8 @@ const buildExpiredProfileYaml = () =>
     // 占位期间仍能探测到续费并自动恢复；其余流量全部走不可达的占位节点（无法上网）。
     rules: [...officialDirectRules(), 'MATCH,节点选择'],
   })
-const DESKTOP_VERSION = '2.5.18'
-const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.18'
+const DESKTOP_VERSION = '2.5.19'
+const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.19'
 const DESKTOP_PLATFORM = getSystem()
 const fieldSx = {
   '& .MuiInputLabel-root': {
@@ -740,7 +740,7 @@ const HomePage = () => {
         client_id: getClientId(),
         platform: 'Windows电脑',
         app_name: '神仙云桌面端',
-        app_version: '2.5.18',
+        app_version: '2.5.19',
         device_name: navigator.userAgent,
       })
       await tauriFetch(
@@ -799,7 +799,7 @@ const HomePage = () => {
           client_id: getClientId(),
           platform: 'Windows电脑',
           app_name: '神仙云桌面端',
-          app_version: '2.5.18',
+          app_version: '2.5.19',
           device_name: navigator.userAgent,
           upload_bytes: uploadDelta,
           download_bytes: downloadDelta,
