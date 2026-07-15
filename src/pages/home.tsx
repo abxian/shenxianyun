@@ -648,27 +648,31 @@ const HomePage = () => {
   const proxyUrlRef = useRef('')
   const legacyMigrationRef = useRef('')
 
-  const primaryGroup = useMemo(
+  const mode = (modeOverride || clashConfig?.mode || 'rule').toLowerCase()
+  const ruleGroup = useMemo(
     () => pickPrimaryGroup((proxies?.groups || []) as IProxyGroupItem[]),
     [proxies?.groups],
   )
+  const nodeGroup =
+    mode === 'global' && proxies?.global?.all?.length
+      ? (proxies.global as IProxyGroupItem)
+      : ruleGroup
   const nodes = useMemo(() => {
     void delaySortTick
-    return [...(primaryGroup?.all || [])]
+    return [...(nodeGroup?.all || [])]
       .filter((proxy) => !['DIRECT', 'REJECT'].includes(proxy.name))
       .sort(
         (a, b) =>
-          delayRank(a, primaryGroup?.name) - delayRank(b, primaryGroup?.name),
+          delayRank(a, nodeGroup?.name) - delayRank(b, nodeGroup?.name),
       )
-  }, [primaryGroup, delaySortTick])
+  }, [nodeGroup, delaySortTick])
 
   const selectedNode = useMemo(() => {
-    if (!primaryGroup) return ''
-    const current = primaryGroup.now || ''
+    if (!nodeGroup) return ''
+    const current = nodeGroup.now || ''
     if (current && nodes.some((node) => node.name === current)) return current
     return nodes[0]?.name || ''
-  }, [nodes, primaryGroup])
-  const mode = (modeOverride || clashConfig?.mode || 'rule').toLowerCase()
+  }, [nodes, nodeGroup])
   const tunOn = verge?.enable_tun_mode || false
   const proxyStateMismatch = systemProxyConfigOn && !systemProxyOn
   const running = tunOn || systemProxyOn
@@ -693,6 +697,7 @@ const HomePage = () => {
   const dnsOverwriteOn = verge?.enable_dns_settings ?? false
   const proxyGuardOn = verge?.enable_proxy_guard ?? true
   const powerHint = running ? '已启动，点击停止' : '还没有启动，点击启动'
+  const nodeSelectLabel = mode === 'global' ? '选择全局节点' : '选择节点'
   const codeDialogTitle =
     codeImportPhase === 'checking'
       ? '正在检查提取码'
@@ -722,14 +727,14 @@ const HomePage = () => {
   const rulesProfileUid = 'Merge'
   const rulePolicies = useMemo(() => {
     const values = [
-      primaryGroup?.name,
+      nodeGroup?.name,
       selectedNode,
       ...nodes.map((node) => node.name),
       'DIRECT',
       'REJECT',
     ].filter((value): value is string => Boolean(value))
     return Array.from(new Set(values))
-  }, [nodes, primaryGroup?.name, selectedNode])
+  }, [nodeGroup?.name, nodes, selectedNode])
   // 统一的 API 请求兜底链：直连 → 内核端口/系统代理 → 后台配置的兜底代理。
   // 逐层重试，解决 OpenClash/fake-ip 误路由、首装用户连不上 web 验证提取码的问题。
   const apiFetch = useCallback(
@@ -1657,12 +1662,12 @@ const HomePage = () => {
   })
 
   const changeNode = (value: string) => {
-    if (!primaryGroup || !value) return
-    changeProxy(primaryGroup.name, value, primaryGroup.now)
+    if (!nodeGroup || !value) return
+    changeProxy(nodeGroup.name, value, nodeGroup.now)
   }
 
   const testNodeDelay = useLockFn(async () => {
-    if (!primaryGroup || nodes.length === 0) {
+    if (!nodeGroup || nodes.length === 0) {
       setStatus('没有可测试的节点')
       return
     }
@@ -1672,7 +1677,7 @@ const HomePage = () => {
     try {
       await delayManager.checkListDelay(
         nodes.map((node) => node.name),
-        primaryGroup.name,
+        nodeGroup.name,
         DELAY_TIMEOUT,
         8,
       )
@@ -2162,12 +2167,12 @@ const HomePage = () => {
       set('proxymode', proxyMode ? 'warn' : 'ok', proxyMode || '规则')
     }
 
-    if (!selectedNode || !primaryGroup) {
+    if (!selectedNode || !nodeGroup) {
       set('node', 'warn', '暂无可用节点')
     } else {
       try {
-        await delayManager.checkDelay(selectedNode, primaryGroup.name, 5000)
-        const delay = delayManager.getDelay(selectedNode, primaryGroup.name)
+        await delayManager.checkDelay(selectedNode, nodeGroup.name, 5000)
+        const delay = delayManager.getDelay(selectedNode, nodeGroup.name)
         if (delay > 0 && delay < 5000) {
           set('node', 'ok', `${selectedNode} · ${delay}ms`)
         } else {
@@ -2421,7 +2426,7 @@ const HomePage = () => {
     const value = isDomainType
       ? normalizeRuleDomain(trafficRuleInput)
       : trafficRuleInput.trim()
-    const policy = trafficRulePolicy || selectedNode || primaryGroup?.name || ''
+    const policy = trafficRulePolicy || selectedNode || nodeGroup?.name || ''
 
     if (!value) {
       setStatus('请输入规则内容')
@@ -2831,17 +2836,17 @@ const HomePage = () => {
 
                   <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
                     <FormControl fullWidth size="small">
-                      <InputLabel>选择节点</InputLabel>
+                      <InputLabel>{nodeSelectLabel}</InputLabel>
                       <Select
                         sx={fieldSx}
-                        label="选择节点"
+                        label={nodeSelectLabel}
                         value={selectedNode}
                         onChange={(event) => changeNode(event.target.value)}
-                        disabled={!primaryGroup || nodes.length === 0}
+                        disabled={!nodeGroup || nodes.length === 0}
                       >
                         {nodes.map((node) => (
                           <MenuItem key={node.name} value={node.name}>
-                            {formatNodeLabel(node, primaryGroup?.name)}
+                            {formatNodeLabel(node, nodeGroup?.name)}
                           </MenuItem>
                         ))}
                       </Select>
@@ -3269,7 +3274,7 @@ const HomePage = () => {
                         setTrafficRulePolicy(
                           trafficRulePolicy ||
                             selectedNode ||
-                            primaryGroup?.name ||
+                            nodeGroup?.name ||
                             '',
                         )
                         setTrafficRuleOpen(true)
