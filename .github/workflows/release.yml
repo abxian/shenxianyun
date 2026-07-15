@@ -326,19 +326,19 @@ jobs:
           deb [arch=amd64,i386] http://archive.ubuntu.com/ubuntu jammy-updates main multiverse universe restricted
           deb [arch=amd64,i386] http://archive.ubuntu.com/ubuntu jammy-backports main multiverse universe restricted
 
-          deb [arch=armhf,arm64] http://ports.ubuntu.com/ubuntu-ports jammy main multiverse universe restricted
-          deb [arch=armhf,arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main multiverse universe restricted
-          deb [arch=armhf,arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main multiverse universe restricted
-          deb [arch=armhf,arm64] http://ports.ubuntu.com/ubuntu-ports jammy-backports main multiverse universe restricted
+          deb [arch=armhf,arm64] https://ports.ubuntu.com/ubuntu-ports jammy main multiverse universe restricted
+          deb [arch=armhf,arm64] https://ports.ubuntu.com/ubuntu-ports jammy-security main multiverse universe restricted
+          deb [arch=armhf,arm64] https://ports.ubuntu.com/ubuntu-ports jammy-updates main multiverse universe restricted
+          deb [arch=armhf,arm64] https://ports.ubuntu.com/ubuntu-ports jammy-backports main multiverse universe restricted
           EOF
 
           sudo mv /etc/apt/sources.list /etc/apt/sources.list.default
           sudo mv /tmp/sources.list /etc/apt/sources.list
 
           sudo dpkg --add-architecture ${{ matrix.arch }}
-          sudo apt update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=4 update
 
-          sudo apt install -y \
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=4 install -y \
             libxslt1.1:${{ matrix.arch }} \
             libwebkit2gtk-4.1-dev:${{ matrix.arch }} \
             libayatana-appindicator3-dev:${{ matrix.arch }} \
@@ -558,6 +558,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # 自有 dufs 第一更新通道：更新包与 update.json 自动发布到 dufs
           DUFS_BASE: ${{ secrets.DUFS_BASE }}
+          DUFS_PUBLIC_BASE: https://sxy.sxnn.de:5443/sxy
           DUFS_USER: ${{ secrets.DUFS_USER }}
           DUFS_PASS: ${{ secrets.DUFS_PASS }}
 
