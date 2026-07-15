@@ -165,12 +165,21 @@ const probeOnce = async (
   }
 }
 
+const isDomesticPrimary = (base: string): boolean => {
+  try {
+    return new URL(base).hostname === 'api.sxnn.de'
+  } catch {
+    return false
+  }
+}
+
 // 判断一条线路是否可用：先本机直连；直连不通且传了 proxyUrl（内核在跑）时，
 // 再经内核端口重试一次——内核带 sxnn.de/jc116.com 直连规则，能绕开系统级
 // OpenClash/fake-ip 把自家服务器误路由到国外节点的问题。任一成功即可用。
 const reachable = async (base: string, proxyUrl?: string): Promise<boolean> => {
   const url = `${base}/api/app-version?_=${Date.now()}`
   if (await probeOnce(url, undefined, 3500)) return true
+  if (isDomesticPrimary(base)) return false
 
   // 直连失败后并发尝试内核代理和后台兜底，避免串行等待 14 秒。
   const boot = getBootstrapProxy()

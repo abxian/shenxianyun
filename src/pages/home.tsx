@@ -2,13 +2,17 @@ import {
   AddRounded,
   BoltRounded,
   BuildRounded,
+  CheckCircleRounded,
   CloudSyncRounded,
   DeleteRounded,
   DnsRounded,
+  ErrorRounded,
   KeyRounded,
   LanRounded,
   LanguageRounded,
   PowerSettingsNewRounded,
+  RefreshRounded,
+  RestartAltRounded,
   RuleRounded,
   SettingsRounded,
   ShoppingCartRounded,
@@ -19,6 +23,7 @@ import {
   Box,
   Button,
   Chip,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -83,10 +88,9 @@ import {
   initEndpointDiscovery,
   listApiBases,
   officialDirectRules,
-  pinnedCount,
+  pickApiBase,
   probeApiBase,
   rotateApiBase,
-  setActiveApiBase,
 } from '@/services/endpoint-resolver'
 import getSystem from '@/utils/get-system'
 
@@ -131,8 +135,8 @@ const buildExpiredProfileYaml = () =>
     // 占位期间仍能探测到续费并自动恢复；其余流量全部走不可达的占位节点（无法上网）。
     rules: [...officialDirectRules(), 'MATCH,节点选择'],
   })
-const DESKTOP_VERSION = '2.5.26-rc.1'
-const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.26-rc.1'
+const DESKTOP_VERSION = '2.5.26'
+const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.26'
 const DESKTOP_PLATFORM = getSystem()
 const fieldSx = {
   '& .MuiInputLabel-root': {
@@ -247,6 +251,14 @@ const TRAFFIC_RULE_TYPES = [
 ] as const
 
 type SelfCheckStatus = 'pending' | 'ok' | 'warn' | 'fail'
+type CodeImportPhase =
+  | 'input'
+  | 'checking'
+  | 'downloading'
+  | 'starting'
+  | 'success'
+  | 'error'
+type ServerCheckStatus = 'idle' | 'checking' | 'connected' | 'disconnected'
 type SelfCheckItem = {
   key: string
   label: string
@@ -285,6 +297,7 @@ const DEFAULT_DNS_CONFIG = {
     'localhost.ptlogin2.qq.com',
     '*.msftncsi.com',
     'www.msftconnecttest.com',
+    'api.sxnn.de',
   ],
   'default-nameserver': ['system', '223.6.6.6', '8.8.8.8'],
   nameserver: ['https://doh.pub/dns-query', 'https://dns.alidns.com/dns-query'],
@@ -400,6 +413,31 @@ const restoreRuleSnapshot = async (
   if (snapshot.subRules !== undefined) data['sub-rules'] = snapshot.subRules
 
   await saveProfileFile(profileUid, yaml.dump(data, { lineWidth: -1 }))
+}
+
+const DOMESTIC_API_DIRECT_RULE = 'DOMAIN,api.sxnn.de,DIRECT'
+
+const isDomesticApiUrl = (url: string): boolean => {
+  try {
+    return new URL(url).hostname === 'api.sxnn.de'
+  } catch {
+    return false
+  }
+}
+
+// 国内 API 始终放在全局规则最前面，避免系统代理开启后又绕进代理节点。
+const ensureDomesticApiDirect = async () => {
+  const content = await readProfileFile('Merge')
+  const data = (yaml.load(content) as Record<string, unknown> | null) || {}
+  const prepend = Array.isArray(data['prepend-rules'])
+    ? (data['prepend-rules'] as unknown[])
+    : []
+  data['prepend-rules'] = [
+    DOMESTIC_API_DIRECT_RULE,
+    ...prepend.filter((rule) => rule !== DOMESTIC_API_DIRECT_RULE),
+  ]
+  await saveProfileFile('Merge', yaml.dump(data, { lineWidth: -1 }))
+  await enhanceProfiles()
 }
 
 const normalizeRuleDomain = (input: string) => {
@@ -522,7 +560,12 @@ const HomePage = () => {
     savedCode ? '提取码已保存，会自动检查订阅更新。' : '',
   )
   const [codeDialogOpen, setCodeDialogOpen] = useState(false)
+  const [codeImportPhase, setCodeImportPhase] =
+    useState<CodeImportPhase>('input')
+  const [codeImportMessage, setCodeImportMessage] = useState('')
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [serverCheckStatus, setServerCheckStatus] =
+    useState<ServerCheckStatus>('idle')
   const [trafficRuleOpen, setTrafficRuleOpen] = useState(false)
   const [trafficRuleInput, setTrafficRuleInput] = useState('')
   const [trafficRuleType, setTrafficRuleType] = useState('DOMAIN-SUFFIX')
@@ -591,8 +634,8 @@ const HomePage = () => {
       )
       setStatus('更新完成，正在重启...')
       await relaunch()
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error))
+    } catch {
+      setStatus('软件下载失败，请稍后重试')
     } finally {
       setUpdating(false)
     }
@@ -650,6 +693,30 @@ const HomePage = () => {
   const dnsOverwriteOn = verge?.enable_dns_settings ?? false
   const proxyGuardOn = verge?.enable_proxy_guard ?? true
   const powerHint = running ? '已启动，点击停止' : '还没有启动，点击启动'
+  const codeDialogTitle =
+    codeImportPhase === 'checking'
+      ? '正在检查提取码'
+      : codeImportPhase === 'downloading'
+        ? '正在获取订阅'
+        : codeImportPhase === 'starting'
+          ? '正在检查网络'
+          : codeImportPhase === 'success'
+            ? '连接成功'
+            : codeImportPhase === 'error'
+              ? '连接未完成'
+              : savedCode
+                ? '切换提取码'
+                : '导入订阅'
+  const codeImportStep =
+    codeImportPhase === 'checking'
+      ? 0
+      : codeImportPhase === 'downloading'
+        ? 1
+        : codeImportPhase === 'starting'
+          ? 2
+          : codeImportPhase === 'success'
+            ? 3
+            : -1
   // 统一写入全局 Merge 配置（UID 固定为 "Merge"，系统保证存在），对所有订阅生效，
   // 不再依赖订阅自带的 option.rules（神仙云订阅通常没有，会导致无法编辑）。
   const rulesProfileUid = 'Merge'
@@ -673,6 +740,8 @@ const HomePage = () => {
       try {
         return await fetchWithVerifiedTls(url, init)
       } catch (err) {
+        // 国内主域名必须直连；失败后由上层自动换线路，不允许绕代理重试。
+        if (isDomesticApiUrl(url)) throw err
         // 第 2 层：内核混合端口（在跑时）或系统代理
         const p = proxyUrlRef.current
         if (p) {
@@ -896,10 +965,15 @@ const HomePage = () => {
     lastReportedTrafficRef.current = current
   }, [apiFetch, running, savedCode])
 
-  const activateCode = async (value: string, retryCount = 3) => {
+  const activateCode = async (
+    value: string,
+    retryCount = 3,
+    onPhase?: (phase: CodeImportPhase) => void,
+  ) => {
     let lastError: unknown
     for (let attempt = 1; attempt <= retryCount; attempt += 1) {
       try {
+        onPhase?.('checking')
         const data = await verifyCode(value)
 
         // 切换到不同提取码时，先停代理再切换；同一提取码重新导入则无需停。
@@ -917,10 +991,12 @@ const HomePage = () => {
 
         // 不开启 clash verge 的周期性自动更新（那会无视内容是否变化、定时重下整个配置，浪费带宽）。
         // 改为只靠后端 update_version 推送：仅当 /api/update-state 的版本号变大时才重新拉取订阅。
+        onPhase?.('downloading')
         await importProfile(data.subscription_url, {
           with_proxy: true,
           allow_auto_update: false,
         })
+        await ensureDomesticApiDirect().catch(() => undefined)
 
         const latestProfiles = await getProfiles()
         const newestProfile = latestProfiles.items?.at(-1)
@@ -956,7 +1032,6 @@ const HomePage = () => {
           await rotateApiBase(proxyUrlRef.current || undefined).catch(
             () => undefined,
           )
-          setStatus(`订阅失败，正在重试 ${attempt}/${retryCount - 1}...`)
           await new Promise((resolve) => setTimeout(resolve, 1000 * attempt))
         }
       }
@@ -1013,6 +1088,7 @@ const HomePage = () => {
       with_proxy: true,
       allow_auto_update: false,
     })
+    await ensureDomesticApiDirect().catch(() => undefined)
     const list = await getProfiles()
     const newest = list.items?.at(-1)
     if (newest?.uid) {
@@ -1102,10 +1178,8 @@ const HomePage = () => {
         await mutateProfiles()
         await refreshAll()
         setStatus('旧版订阅已迁移并更新')
-      } catch (error) {
-        setStatus(
-          `旧版订阅迁移失败：${error instanceof Error ? error.message : String(error)}`,
-        )
+      } catch {
+        setStatus('旧版订阅迁移失败，请重新导入提取码')
       }
     })()
   }, [
@@ -1117,43 +1191,22 @@ const HomePage = () => {
     verifyCode,
   ])
 
-  // ===== 线路（web/api_bases 地址）状态条：显示线路1/2/3 连通状态，自动选可用，可手动点选 =====
-  const [lines, setLines] = useState<{ base: string; ok: boolean | null }[]>([])
-  const [activeLine, setActiveLine] = useState('')
-  const refreshLines = useCallback(async () => {
+  // 服务器地址与切换过程完全交给客户端，只向高级用户展示汇总连通状态。
+  const checkServerConnection = useCallback(async () => {
+    setServerCheckStatus('checking')
     const bases = listApiBases()
-    setLines(bases.map((base) => ({ base, ok: null })))
-    setActiveLine(getApiBase())
-    await Promise.all(
-      bases.map(async (base) => {
-        const ok = await probeApiBase(base, proxyUrlRef.current || undefined)
-        setLines((prev) =>
-          prev.map((l) => (l.base === base ? { ...l, ok } : l)),
-        )
-      }),
+    const results = await Promise.all(
+      bases.map((base) =>
+        probeApiBase(base, proxyUrlRef.current || undefined),
+      ),
     )
-    // 探测完成后再同步一次（发现/自动切换可能改了 active）
-    setActiveLine(getApiBase())
-  }, [])
-
-  // 国内主线路正常时隐藏其它线路；仅国内失败才显示国外/内穿兜底入口。
-  const showLineBar = useMemo(() => {
-    const pinned = lines.slice(0, pinnedCount())
-    return pinned.length >= pinnedCount() && pinned.every((l) => l.ok === false)
-  }, [lines])
-
-  const switchLine = useLockFn(async (base: string, index: number) => {
-    setStatus(`正在测试神仙云${index + 1}...`)
-    const ok = await probeApiBase(base, proxyUrlRef.current || undefined)
-    setLines((prev) => prev.map((l) => (l.base === base ? { ...l, ok } : l)))
-    if (ok) {
-      setActiveApiBase(base)
-      setActiveLine(base)
-      setStatus(`已切换到神仙云${index + 1}`)
-    } else {
-      setStatus(`神仙云${index + 1}不通，未切换`)
+    const connected = results.some(Boolean)
+    if (connected) {
+      await pickApiBase(proxyUrlRef.current || undefined).catch(() => undefined)
     }
-  })
+    setServerCheckStatus(connected ? 'connected' : 'disconnected')
+    return connected
+  }, [])
 
   // 端点发现：启动时后台拉取 endpoints.json 并探测可用 API 基址。
   // 失败静默（用缓存/内置默认兜底），不阻塞任何功能。
@@ -1161,23 +1214,24 @@ const HomePage = () => {
     initEndpointDiscovery(proxyUrlRef.current || undefined)
       .catch(() => undefined)
       .finally(() => {
-        refreshLines().catch(() => undefined)
+        ensureDomesticApiDirect().catch(() => undefined)
+        checkServerConnection().catch(() => undefined)
       })
     // 启动瞬间核心/系统代理可能未就绪，10 秒后快速复测一次，尽快纠正误报
     const quick = window.setTimeout(() => {
-      refreshLines().catch(() => undefined)
+      checkServerConnection().catch(() => undefined)
     }, 10_000)
     return () => window.clearTimeout(quick)
-  }, [refreshLines])
+  }, [checkServerConnection])
 
   // 线路状态周期性重测：启动瞬间核心/系统代理可能未就绪导致误报「不通」，
   // 每 60 秒自动重探一轮，状态始终反映当前真实连通性。
   useEffect(() => {
     const timer = window.setInterval(() => {
-      refreshLines().catch(() => undefined)
+      checkServerConnection().catch(() => undefined)
     }, 60_000)
     return () => window.clearInterval(timer)
-  }, [refreshLines])
+  }, [checkServerConnection])
 
   useEffect(() => {
     // jc116 桌面版本检查已停用，改用 Tauri updater（GitHub releases 签名自动更新）
@@ -1348,8 +1402,8 @@ const HomePage = () => {
       await mutateProfiles()
       await refreshAll()
       setStatus('订阅已更新，同提取码规则已保留')
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error))
+    } catch {
+      setStatus('订阅更新失败，请稍后重试')
     } finally {
       setBusy(false)
     }
@@ -1379,6 +1433,7 @@ const HomePage = () => {
     try {
       // 不开启周期性自动更新，避免无谓重下整个配置。
       await importProfile(url, { with_proxy: true, allow_auto_update: false })
+      await ensureDomesticApiDirect().catch(() => undefined)
       const list = await getProfiles()
       const newest = list.items?.at(-1)
       if (newest?.uid) {
@@ -1388,8 +1443,8 @@ const HomePage = () => {
       await mutateProfiles()
       await refreshAll()
       setStatus('订阅已导入并切换')
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error))
+    } catch {
+      setStatus('订阅导入失败，请检查链接后重试')
     } finally {
       setManualBusy(false)
     }
@@ -1489,13 +1544,15 @@ const HomePage = () => {
         await stopCore().catch(() => {})
         await invalidateProxyState()
         await refreshAll()
-        await sendClientPresence(false)
+        sendClientPresence(false).catch(() => undefined)
         setStatus('已停止代理')
         return
       }
 
       if (!current?.uid) {
         setStatus('请先导入订阅')
+        setCodeImportPhase('input')
+        setCodeImportMessage('')
         setCodeDialogOpen(true)
         return
       }
@@ -1557,9 +1614,9 @@ const HomePage = () => {
       }
       await invalidateProxyState()
       await refreshAll()
-      await sendClientPresence(true)
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error))
+      sendClientPresence(true).catch(() => undefined)
+    } catch {
+      setStatus('操作失败，请重启软件或在高级设置中运行自检')
     } finally {
       setBusy(false)
     }
@@ -1705,7 +1762,6 @@ const HomePage = () => {
       (await probe('https://www.baidu.com', true, 8000)) ||
       (await probe('https://www.gstatic.com/generate_204', true, 8000))
 
-    setStatus('订阅已导入，正在启动并检查网络...')
     if (proxyStateMismatch) await toggleSystemProxy(false).catch(() => {})
     await startCore().catch(() => restartCore())
     await mutateSystemState()
@@ -1727,7 +1783,6 @@ const HomePage = () => {
     await new Promise((resolve) => setTimeout(resolve, 800))
 
     if (!(await portAlive())) {
-      setStatus('首次联网检查失败，正在自动重启内核...')
       await restartCore()
       if (!useTun) {
         await toggleSystemProxy(false).catch(() => {})
@@ -1754,24 +1809,41 @@ const HomePage = () => {
   const importByCode = useLockFn(async () => {
     const value = code.trim()
     if (!value) {
-      setStatus('请输入提取码')
+      setCodeImportMessage('请输入提取码')
       return
     }
 
     setBusy(true)
-    setStatus(isSwitchingCode ? '正在切换提取码...' : '正在验证提取码...')
+    setStatus('')
+    setCodeImportMessage('')
+    let phase: CodeImportPhase = 'checking'
+    const updatePhase = (next: CodeImportPhase) => {
+      phase = next
+      setCodeImportPhase(next)
+    }
+    updatePhase('checking')
     try {
-      const data = await activateCode(value)
+      const data = await activateCode(value, 3, updatePhase)
+      updatePhase('starting')
       await startImportedProfile()
       setCode('')
-      setCodeDialogOpen(false)
-      setStatus(
-        `${isSwitchingCode ? '提取码已切换' : '订阅已导入'}，代理已启动且联网正常${
+      updatePhase('success')
+      setCodeImportMessage(
+        `${isSwitchingCode ? '提取码已切换' : '订阅已导入'}，网络连接正常${
           data.expires_at ? `，到期 ${data.expires_at}` : ''
         }`,
       )
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error))
+      setStatus('订阅已导入，网络连接正常')
+    } catch {
+      const failedPhase = phase
+      updatePhase('error')
+      setCodeImportMessage(
+        failedPhase === 'checking'
+          ? '提取码验证失败，请检查提取码或网络后重试。'
+          : failedPhase === 'downloading'
+            ? '订阅获取失败，请稍后重新检测。'
+            : '订阅已导入，但联网检查失败。可以重新检测、重启软件或彻底重置。',
+      )
     } finally {
       setBusy(false)
     }
@@ -2307,6 +2379,7 @@ const HomePage = () => {
         : []
       setTrafficRules(
         [...prepend, ...append]
+          .filter((rule) => rule !== DOMESTIC_API_DIRECT_RULE)
           .map(parseTrafficRule)
           .filter((item): item is TrafficRuleItem => Boolean(item)),
       )
@@ -2592,56 +2665,6 @@ const HomePage = () => {
             </Stack>
           </Stack>
 
-          {showLineBar && (
-            <Stack
-              direction="row"
-              spacing={0.75}
-              useFlexGap
-              sx={{ flexWrap: 'wrap', alignItems: 'center' }}
-            >
-              <Typography
-                sx={{
-                  fontSize: 12,
-                  fontWeight: 800,
-                  color: 'rgba(226,236,250,.78)',
-                }}
-              >
-                服务线路
-              </Typography>
-              {lines.map((l, i) => {
-                const isActive = activeLine === l.base
-                return (
-                  <Chip
-                    key={l.base}
-                    size="small"
-                    clickable
-                    onClick={() => switchLine(l.base, i)}
-                    label={`神仙云${i + 1}${
-                      l.ok === null ? ' …' : l.ok ? '' : ' ✕'
-                    }`}
-                    color={isActive ? 'success' : 'default'}
-                    variant={isActive ? 'filled' : 'outlined'}
-                    sx={{
-                      fontWeight: 700,
-                      ...(isActive
-                        ? {}
-                        : {
-                            color:
-                              l.ok === false
-                                ? 'rgba(226,236,250,.45)'
-                                : 'rgba(226,236,250,.88)',
-                            borderColor: 'rgba(255,255,255,.32)',
-                          }),
-                    }}
-                  />
-                )
-              })}
-              <Typography sx={{ fontSize: 11, color: 'rgba(226,236,250,.55)' }}>
-                自动选择可用线路，可点选切换
-              </Typography>
-            </Stack>
-          )}
-
           <Paper
             elevation={0}
             sx={{
@@ -2846,6 +2869,8 @@ const HomePage = () => {
                       disabled={busy}
                       onClick={() => {
                         setCode('')
+                        setCodeImportPhase('input')
+                        setCodeImportMessage('')
                         setCodeDialogOpen(true)
                       }}
                       sx={{
@@ -3054,6 +3079,64 @@ const HomePage = () => {
                       }}
                     >
                       开始自检
+                    </Button>
+                  </Stack>
+                </Paper>
+                <Paper
+                  elevation={0}
+                  sx={{
+                    p: 1.25,
+                    borderRadius: '14px',
+                    border: '1px solid rgba(45,65,105,.12)',
+                    bgcolor: 'rgba(255,255,255,.72)',
+                  }}
+                >
+                  <Stack
+                    direction="row"
+                    spacing={1.1}
+                    sx={{ alignItems: 'center' }}
+                  >
+                    <LanguageRounded sx={{ color: '#1c8dff' }} />
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography sx={{ fontWeight: 850 }}>
+                        服务器检测
+                      </Typography>
+                      <Typography
+                        sx={{ fontSize: 12, color: 'rgba(36,46,66,.62)' }}
+                      >
+                        自动检测并选择可用服务器，不显示服务器地址。
+                      </Typography>
+                    </Box>
+                    <Chip
+                      size="small"
+                      color={
+                        serverCheckStatus === 'connected'
+                          ? 'success'
+                          : serverCheckStatus === 'disconnected'
+                            ? 'error'
+                            : 'default'
+                      }
+                      label={
+                        serverCheckStatus === 'checking'
+                          ? '检测中'
+                          : serverCheckStatus === 'connected'
+                            ? '已连通'
+                            : serverCheckStatus === 'disconnected'
+                              ? '未连通'
+                              : '待检测'
+                      }
+                      sx={{ fontWeight: 800 }}
+                    />
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<RefreshRounded />}
+                      disabled={serverCheckStatus === 'checking'}
+                      onClick={() =>
+                        checkServerConnection().catch(() => undefined)
+                      }
+                    >
+                      检测
                     </Button>
                   </Stack>
                 </Paper>
@@ -3701,6 +3784,8 @@ const HomePage = () => {
             onClose={() => {
               if (busy) return
               setCode('')
+              setCodeImportPhase('input')
+              setCodeImportMessage('')
               setCodeDialogOpen(false)
             }}
             fullWidth
@@ -3717,76 +3802,267 @@ const HomePage = () => {
             }}
           >
             <DialogTitle sx={{ fontWeight: 900, pb: 0.5 }}>
-              {savedCode ? '切换提取码' : '导入订阅'}
+              {codeDialogTitle}
             </DialogTitle>
             <DialogContent sx={{ pt: 1.5 }}>
-              <Typography
-                sx={{
-                  mb: 1.5,
-                  fontSize: 13,
-                  color: 'rgba(36,46,66,.66)',
-                }}
-              >
-                {savedCode
-                  ? '输入新的提取码后会替换当前订阅。'
-                  : '输入后台生成的提取码，客户端会自动获取订阅。'}
-              </Typography>
-              <TextField
-                autoFocus
-                fullWidth
-                size="small"
-                sx={fieldSx}
-                value={code}
-                onChange={(event) => setCode(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && code.trim() && !busy) {
-                    importByCode()
-                  }
-                }}
-                label="提取码"
-                placeholder="请输入提取码"
-                disabled={busy}
-                slotProps={{
-                  input: {
-                    sx: fieldSx,
-                    startAdornment: (
-                      <KeyRounded
-                        sx={{ mr: 1, color: 'rgba(28,141,255,.78)' }}
+              {codeImportPhase === 'input' ? (
+                <Stack spacing={1.5}>
+                  <Typography
+                    sx={{ fontSize: 13, color: 'rgba(36,46,66,.66)' }}
+                  >
+                    {savedCode
+                      ? '输入新的提取码后会自动检查并替换当前订阅。'
+                      : '输入提取码后会自动检查服务器、获取订阅并测试网络。'}
+                  </Typography>
+                  <TextField
+                    autoFocus
+                    fullWidth
+                    size="small"
+                    sx={fieldSx}
+                    value={code}
+                    onChange={(event) => {
+                      setCode(event.target.value)
+                      setCodeImportMessage('')
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && code.trim() && !busy) {
+                        importByCode()
+                      }
+                    }}
+                    label="提取码"
+                    placeholder="请输入提取码"
+                    disabled={busy}
+                    slotProps={{
+                      input: {
+                        sx: fieldSx,
+                        startAdornment: (
+                          <KeyRounded
+                            sx={{ mr: 1, color: 'rgba(28,141,255,.78)' }}
+                          />
+                        ),
+                      },
+                      inputLabel: {
+                        sx: {
+                          color: 'rgba(36,46,66,.66)',
+                          '&.Mui-focused': { color: '#1c8dff' },
+                        },
+                      },
+                    }}
+                  />
+                  {codeImportMessage && (
+                    <Alert severity="warning" sx={{ py: 0.35 }}>
+                      {codeImportMessage}
+                    </Alert>
+                  )}
+                </Stack>
+              ) : codeImportPhase === 'error' ? (
+                <Stack spacing={1.5} sx={{ alignItems: 'center', pt: 0.5 }}>
+                  <Box
+                    sx={{
+                      width: 64,
+                      height: 64,
+                      borderRadius: '50%',
+                      display: 'grid',
+                      placeItems: 'center',
+                      bgcolor: 'rgba(229,72,77,.1)',
+                    }}
+                  >
+                    <ErrorRounded sx={{ color: '#e5484d', fontSize: 38 }} />
+                  </Box>
+                  <Typography
+                    sx={{
+                      textAlign: 'center',
+                      fontSize: 14,
+                      color: 'rgba(36,46,66,.78)',
+                    }}
+                  >
+                    {codeImportMessage}
+                  </Typography>
+                  <Stack direction="row" spacing={1} sx={{ width: '100%' }}>
+                    <Button
+                      fullWidth
+                      variant="outlined"
+                      startIcon={<RestartAltRounded />}
+                      onClick={() => restartApp()}
+                    >
+                      重启软件
+                    </Button>
+                    <Button
+                      fullWidth
+                      color="error"
+                      variant="outlined"
+                      startIcon={<DeleteRounded />}
+                      onClick={() => {
+                        setCodeDialogOpen(false)
+                        setResetConfirmOpen(true)
+                      }}
+                    >
+                      彻底重置
+                    </Button>
+                  </Stack>
+                </Stack>
+              ) : (
+                <Stack spacing={1.6} sx={{ alignItems: 'center', pt: 0.5 }}>
+                  <Box
+                    sx={{
+                      width: 72,
+                      height: 72,
+                      borderRadius: '50%',
+                      display: 'grid',
+                      placeItems: 'center',
+                      bgcolor:
+                        codeImportPhase === 'success'
+                          ? 'rgba(24,166,121,.1)'
+                          : 'rgba(28,141,255,.09)',
+                    }}
+                  >
+                    {codeImportPhase === 'success' ? (
+                      <CheckCircleRounded
+                        sx={{ color: '#18a679', fontSize: 44 }}
                       />
-                    ),
-                  },
-                  inputLabel: {
-                    sx: {
-                      color: 'rgba(36,46,66,.66)',
-                      '&.Mui-focused': { color: '#1c8dff' },
-                    },
-                  },
-                }}
-              />
+                    ) : (
+                      <CircularProgress size={38} thickness={4.5} />
+                    )}
+                  </Box>
+                  <Typography
+                    sx={{
+                      textAlign: 'center',
+                      fontSize: 14,
+                      fontWeight: 700,
+                      color: 'rgba(36,46,66,.78)',
+                    }}
+                  >
+                    {codeImportPhase === 'checking'
+                      ? '正在确认提取码和服务器连接，请稍候…'
+                      : codeImportPhase === 'downloading'
+                        ? '验证成功，正在获取并保存订阅…'
+                        : codeImportPhase === 'starting'
+                          ? '订阅已导入，正在启动并测试网络…'
+                          : codeImportMessage}
+                  </Typography>
+                  <Stack spacing={0.8} sx={{ width: '100%' }}>
+                    {['检查提取码', '获取订阅', '启动并测试网络'].map(
+                      (label, index) => {
+                        const done = codeImportStep > index
+                        const active = codeImportStep === index
+                        return (
+                          <Paper
+                            key={label}
+                            elevation={0}
+                            sx={{
+                              px: 1.25,
+                              py: 0.8,
+                              borderRadius: '8px',
+                              border: '1px solid rgba(45,65,105,.1)',
+                              bgcolor: active
+                                ? 'rgba(28,141,255,.07)'
+                                : 'rgba(255,255,255,.65)',
+                            }}
+                          >
+                            <Stack
+                              direction="row"
+                              spacing={1}
+                              sx={{ alignItems: 'center' }}
+                            >
+                              <Box
+                                sx={{
+                                  width: 22,
+                                  height: 22,
+                                  borderRadius: '50%',
+                                  display: 'grid',
+                                  placeItems: 'center',
+                                  fontSize: 12,
+                                  fontWeight: 900,
+                                  color: done || active ? '#fff' : '#778095',
+                                  bgcolor: done
+                                    ? '#18a679'
+                                    : active
+                                      ? '#1c8dff'
+                                      : 'rgba(45,65,105,.1)',
+                                }}
+                              >
+                                {done ? '✓' : index + 1}
+                              </Box>
+                              <Typography
+                                sx={{
+                                  fontSize: 13,
+                                  fontWeight: active || done ? 800 : 600,
+                                  color: 'rgba(36,46,66,.76)',
+                                }}
+                              >
+                                {label}
+                              </Typography>
+                            </Stack>
+                          </Paper>
+                        )
+                      },
+                    )}
+                  </Stack>
+                </Stack>
+              )}
             </DialogContent>
             <DialogActions sx={{ px: 3, pb: 2.5 }}>
-              <Button
-                disabled={busy}
-                onClick={() => {
-                  setCode('')
-                  setCodeDialogOpen(false)
-                }}
-              >
-                取消
-              </Button>
-              <Button
-                variant="contained"
-                disabled={busy || !code.trim()}
-                onClick={importByCode}
-                sx={{
-                  minWidth: 104,
-                  bgcolor: '#1c8dff',
-                  fontWeight: 800,
-                  '&:hover': { bgcolor: '#167ce3' },
-                }}
-              >
-                {busy ? '处理中' : savedCode ? '确认切换' : '确认导入'}
-              </Button>
+              {codeImportPhase === 'input' ? (
+                <>
+                  <Button
+                    disabled={busy}
+                    onClick={() => {
+                      setCode('')
+                      setCodeDialogOpen(false)
+                    }}
+                  >
+                    取消
+                  </Button>
+                  <Button
+                    variant="contained"
+                    disabled={busy || !code.trim()}
+                    onClick={importByCode}
+                    sx={{
+                      minWidth: 104,
+                      bgcolor: '#1c8dff',
+                      fontWeight: 800,
+                      '&:hover': { bgcolor: '#167ce3' },
+                    }}
+                  >
+                    {savedCode ? '确认切换' : '开始检查'}
+                  </Button>
+                </>
+              ) : codeImportPhase === 'error' ? (
+                <>
+                  <Button
+                    onClick={() => {
+                      setCodeImportPhase('input')
+                      setCodeImportMessage('')
+                    }}
+                  >
+                    修改提取码
+                  </Button>
+                  <Button
+                    variant="contained"
+                    startIcon={<RefreshRounded />}
+                    onClick={importByCode}
+                  >
+                    重新检测
+                  </Button>
+                </>
+              ) : codeImportPhase === 'success' ? (
+                <Button
+                  variant="contained"
+                  onClick={() => {
+                    setCodeImportPhase('input')
+                    setCodeImportMessage('')
+                    setCodeDialogOpen(false)
+                  }}
+                >
+                  开始使用
+                </Button>
+              ) : (
+                <Typography
+                  sx={{ mr: 'auto', fontSize: 12, color: 'rgba(36,46,66,.5)' }}
+                >
+                  检测期间请不要关闭软件
+                </Typography>
+              )}
             </DialogActions>
           </Dialog>
 
@@ -3981,6 +4257,9 @@ const HomePage = () => {
               <Button
                 onClick={() => {
                   setExpiredDialogOpen(false)
+                  setCode('')
+                  setCodeImportPhase('input')
+                  setCodeImportMessage('')
                   setCodeDialogOpen(true)
                 }}
               >
