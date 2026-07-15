@@ -86,6 +86,7 @@ async function processRelease(github, options, tag, isAlpha) {
 
     const updateData = {
       name: tag.name,
+      version: tag.name.replace(/^v/, ''),
       notes: await resolveUpdateLog(tag.name).catch(() =>
         resolveUpdateLogDefault().catch(() => 'No changelog available'),
       ),
