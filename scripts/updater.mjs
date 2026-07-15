@@ -359,13 +359,19 @@ async function publishToDufs(updateData) {
       continue
     }
     try {
-      const res = await fetch(value.url)
-      if (!res.ok) {
-        console.log(`[dufs] download ${filename} failed: HTTP ${res.status}`)
-        uploaded.set(value.url, false)
-        continue
+      // GitHub release 大文件偶发 fetch failed，重试最多 4 次
+      let buf = null
+      for (let attempt = 1; attempt <= 4 && !buf; attempt++) {
+        try {
+          const res = await fetch(value.url)
+          if (!res.ok) { console.log(`[dufs] ${filename} HTTP ${res.status} (try ${attempt})`); continue }
+          buf = Buffer.from(await res.arrayBuffer())
+        } catch (e) {
+          console.log(`[dufs] ${filename} fetch err (try ${attempt}): ${e.message}`)
+          await new Promise((r) => setTimeout(r, 3000 * attempt))
+        }
       }
-      const buf = Buffer.from(await res.arrayBuffer())
+      if (!buf) { uploaded.set(value.url, false); continue }
       const put = await fetch(target, {
         method: 'PUT',
         headers: { Authorization: auth },
