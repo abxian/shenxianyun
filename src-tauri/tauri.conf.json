@@ -33,6 +33,7 @@
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZENENGNjdDNzk3NDJFMTYKUldRV0xuUjVmUFpNYlQ2M3A4UVVrS2swTW94a1RJYU5wcUJWSFpGR0lYSFhDdUN6Z1VycG5TN0wK",
       "dangerousInsecureTransportProtocol": true,
       "endpoints": [
+        "https://sxy.sxnn.de:5443/sxy/update.json",
         "http://114.80.36.225:5011/sxy/update.json",
         "https://gh-proxy.org/https://github.com/abxian/shenxianyun/releases/download/updater/update-proxy.json",
         "https://github.com/abxian/shenxianyun/releases/download/updater/update.json"
@@ -43,7 +44,7 @@
     },
     "deep-link": {
       "desktop": {
-        "schemes": ["clash", "clash-verge"]
+        "schemes": ["clash", "clash-verge", "shenxianyun"]
       }
     }
   },

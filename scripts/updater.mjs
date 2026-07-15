@@ -333,6 +333,9 @@ async function publishToDufs(updateData) {
     console.log('[dufs] DUFS_BASE not set, skip dufs publish')
     return
   }
+  // 下载地址用对外域名(反代)，上传仍走 DUFS_BASE(内穿直连,鉴权稳定)。
+  // 未配置 DUFS_PUBLIC_BASE 时下载地址与上传地址一致。
+  const publicBase = (process.env.DUFS_PUBLIC_BASE || base).replace(/\/+$/, '')
   const auth =
     'Basic ' +
     Buffer.from(
@@ -352,7 +355,7 @@ async function publishToDufs(updateData) {
     const filename = decodeURIComponent(value.url.split('/').pop())
     const target = `${base}/updater/${encodeURIComponent(filename)}`
     if (uploaded.has(value.url)) {
-      if (uploaded.get(value.url)) value.url = target
+      if (uploaded.get(value.url)) value.url = `${publicBase}/updater/${encodeURIComponent(filename)}`
       continue
     }
     try {
@@ -370,7 +373,7 @@ async function publishToDufs(updateData) {
       })
       console.log(`[dufs] ${key}: ${filename} -> HTTP ${put.status}`)
       uploaded.set(value.url, put.ok)
-      if (put.ok) value.url = target
+      if (put.ok) value.url = `${publicBase}/updater/${encodeURIComponent(filename)}`
     } catch (err) {
       console.log(`[dufs] ${filename} error: ${err.message}`)
       uploaded.set(value.url, false)
