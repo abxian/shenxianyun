@@ -316,6 +316,26 @@ const parseExpireTime = (value: string) => {
   return Number.isNaN(time) ? Number.POSITIVE_INFINITY : time
 }
 
+// 从订阅 URL 提取神仙云提取码：仅当域名是本站(sxnn.de / jc116.com / 内穿IP)
+// 且路径是 /sub/<code> 时才认。用于把"一键导入的官网订阅"识别为提取码订阅、
+// 受有效期管理;其它网站的 Clash 配置不匹配 → 不受限制,自由使用。
+const extractCodeFromProfileUrl = (url: string): string => {
+  if (!url) return ''
+  try {
+    const u = new URL(url)
+    const host = u.hostname
+    const isOfficial =
+      /(^|\.)sxnn\.de$/.test(host) ||
+      /(^|\.)jc116\.com$/.test(host) ||
+      /^\d+\.\d+\.\d+\.\d+$/.test(host)
+    if (!isOfficial) return ''
+    const m = u.pathname.match(/\/sub\/([^/]+)/)
+    return m ? decodeURIComponent(m[1]) : ''
+  } catch {
+    return ''
+  }
+}
+
 const compareVersion = (remote: string, current: string) => {
   const parse = (value: string) =>
     value
@@ -1009,6 +1029,18 @@ const HomePage = () => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 60_000)
     return () => window.clearInterval(timer)
   }, [])
+
+  // 官网订阅绑定提取码：当前配置若是神仙云官网订阅（一键导入 shenxianyun:// 或提取码导入，
+  // url 含 /sub/<code>），自动把提取码存下来，使其与"输入提取码"一样受有效期管理。
+  // 只做绑定不解绑（避免影响到期占位配置的续费恢复）；外部/本地配置 url 不匹配 → 不绑定 → 不受限。
+  useEffect(() => {
+    const code = extractCodeFromProfileUrl(current?.url || '')
+    if (code && code !== savedCode) {
+      localStorage.setItem(CODE_STORAGE_KEY, code)
+      if (current?.uid) localStorage.setItem(CODE_PROFILE_UID_KEY, current.uid)
+      setSavedCode(code)
+    }
+  }, [current?.uid, current?.url, savedCode])
 
   // ===== 线路（web/api_bases 地址）状态条：显示线路1/2/3 连通状态，自动选可用，可手动点选 =====
   const [lines, setLines] = useState<{ base: string; ok: boolean | null }[]>([])
