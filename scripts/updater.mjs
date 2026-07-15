@@ -296,9 +296,10 @@ async function processRelease(github, options, tag, isAlpha) {
 
       // 自有 dufs 是第一更新通道：把更新包搬运到 dufs 并发布 update.json（仅稳定版）
       if (!isAlpha) {
-        await publishToDufs(updateData).catch((err) =>
-          console.error('[dufs] publish failed:', err.message),
-        )
+        await publishToDufs(updateData).catch((err) => {
+          console.error('[dufs] publish failed:', err.message)
+          process.exitCode = 1
+        })
       }
     } catch (error) {
       console.error(
@@ -373,14 +374,30 @@ async function publishToDufs(updateData) {
         }
       }
       if (!buf) { uploaded.set(value.url, false); continue }
-      const put = await fetch(target, {
-        method: 'PUT',
-        headers: { Authorization: auth },
-        body: buf,
-      })
-      console.log(`[dufs] ${key}: ${filename} -> HTTP ${put.status}`)
-      uploaded.set(value.url, put.ok)
-      if (put.ok) value.url = `${publicBase}/updater/${encodeURIComponent(filename)}`
+      let putOk = false
+      for (let attempt = 1; attempt <= 4 && !putOk; attempt++) {
+        try {
+          const put = await fetch(target, {
+            method: 'PUT',
+            headers: { Authorization: auth },
+            body: buf,
+          })
+          const head = await fetch(target, {
+            method: 'HEAD',
+            headers: { Authorization: auth },
+          })
+          const uploadedSize = Number(head.headers.get('content-length'))
+          putOk = put.ok && head.ok && uploadedSize === buf.length
+          console.log(
+            `[dufs] ${key}: ${filename} -> HTTP ${put.status}, ${uploadedSize}/${buf.length} bytes (try ${attempt})`,
+          )
+        } catch (e) {
+          console.log(`[dufs] ${filename} upload err (try ${attempt}): ${e.message}`)
+        }
+        if (!putOk) await new Promise((r) => setTimeout(r, 3000 * attempt))
+      }
+      uploaded.set(value.url, putOk)
+      if (putOk) value.url = `${publicBase}/updater/${encodeURIComponent(filename)}`
     } catch (err) {
       console.log(`[dufs] ${filename} error: ${err.message}`)
       uploaded.set(value.url, false)
@@ -393,6 +410,12 @@ async function publishToDufs(updateData) {
     body: JSON.stringify(dufsData, null, 2),
   })
   console.log(`[dufs] update.json -> HTTP ${putJson.status}`)
+  const failedUploads = [...uploaded.values()].filter((ok) => !ok).length
+  if (!putJson.ok || failedUploads > 0) {
+    throw new Error(
+      `dufs publish incomplete: ${failedUploads} file(s) failed, update.json HTTP ${putJson.status}`,
+    )
+  }
 }
 
 resolveUpdater().catch(console.error)
