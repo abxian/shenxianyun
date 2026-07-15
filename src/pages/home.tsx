@@ -1394,38 +1394,38 @@ const HomePage = () => {
         return
       }
 
-      if (!currentCode) {
-        setStatus('请先输入提取码')
-        return
-      }
+      // 只有「提取码」导入的配置才做有效期校验;一键导入官网订阅 / 手动导入的
+      // Clash 配置(无提取码)直接允许启动——服务端已用签名订阅 URL 控制有效性,
+      // 不再强制客户端必须输入提取码,否则一键导入的用户会被卡住无法启动。
+      if (currentCode) {
+        setStatus('正在检查提取码有效期...')
+        let expired = Boolean(expiresAt && Date.now() > parseExpireTime(expiresAt))
 
-      setStatus('正在检查提取码有效期...')
-      let expired = Boolean(expiresAt && Date.now() > parseExpireTime(expiresAt))
-
-      if (!expired) {
-        try {
-          const state = await updateState(currentCode)
-          if (state.update_version) {
-            localStorage.setItem(
-              CODE_UPDATE_VERSION_STORAGE_KEY,
-              String(state.update_version),
-            )
-          }
-        } catch (error) {
-          if (error instanceof AccessCodeStateError && error.serverRejected) {
-            expired = true
-          } else {
-            // 网络错误（如 web 掉线）不阻止开启，仍用本地已有订阅。
-            setStatus('')
+        if (!expired) {
+          try {
+            const state = await updateState(currentCode)
+            if (state.update_version) {
+              localStorage.setItem(
+                CODE_UPDATE_VERSION_STORAGE_KEY,
+                String(state.update_version),
+              )
+            }
+          } catch (error) {
+            if (error instanceof AccessCodeStateError && error.serverRejected) {
+              expired = true
+            } else {
+              // 网络错误（如 web 掉线）不阻止开启，仍用本地已有订阅。
+              setStatus('')
+            }
           }
         }
-      }
 
-      // 已到期：仍允许开启开关，但切换到只含一个不可上网节点的占位配置，并弹窗提示续费。
-      // 续费后由轮询自动检测并恢复正式订阅。
-      if (expired) {
-        await activateExpiredProfile().catch(() => {})
-        setExpiredDialogOpen(true)
+        // 已到期：仍允许开启开关，但切换到只含一个不可上网节点的占位配置，并弹窗提示续费。
+        // 续费后由轮询自动检测并恢复正式订阅。
+        if (expired) {
+          await activateExpiredProfile().catch(() => {})
+          setExpiredDialogOpen(true)
+        }
       }
 
       setStatus('正在启动...')
