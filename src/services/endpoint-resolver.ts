@@ -8,28 +8,29 @@ import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
  * 发现失败 → 用本地缓存；再没有 → 用内置默认。任何一步都不阻塞启动。
  */
 
-// 写死的两条主线路：神仙云1=国内直连域名, 神仙云2=国外(Cloudflare)域名。
-// 始终排在最前，保证任何情况下都有稳定的国内+国外入口；
-// endpoints.json 的 api_bases 里的其它地址去重后接在其后（神仙云3/4…）。
+// 首装和每次启动都先使用国内主域名。其它地址只在国内线路检测失败时兜底，
+// 不能因为响应更快就抢占国内主线路。
 export const PINNED_API_BASES = [
   'https://api.sxnn.de:5443', // 神仙云1 国内直连
-  'https://sxnn.de', // 神仙云2 国外(CF)
 ]
 
-// 固定保留线路：内穿裸地址 + 旧域名。覆盖安装后的旧数据仍可继续使用，
-// 主线路故障时也不依赖 endpoints.json 才能找到兜底入口。
-export const RESERVED_API_BASES = [
-  'http://114.80.36.225:5010',
-  'https://sub.jc116.com',
-]
+// 仅作为故障兜底参与并发检测。旧 sub.jc116.com 已失效，不再作为线路候选。
+const FALLBACK_API_BASES = ['https://sxnn.de', 'http://114.80.36.225:5010']
+const RETIRED_API_HOSTS = new Set(['sub.jc116.com'])
 // 内置兜底默认值（发现源全挂时用第一条写死线路）
 export const DEFAULT_API_BASE = PINNED_API_BASES[0]
 
-// 完整线路列表 = 写死主线路(神仙云1/2) + 发现到的 api_bases(神仙云3/4…, 去重, 排后面)
+// 完整线路按固定优先级排列；并发检测只缩短等待时间，不改变选择优先级。
 const allApiBases = (): string[] => {
-  const merged = [...PINNED_API_BASES, ...RESERVED_API_BASES]
+  const merged = [...PINNED_API_BASES, ...FALLBACK_API_BASES]
   for (const b of readCache()?.api_bases ?? []) {
-    if (b && !merged.includes(b)) merged.push(b)
+    let host = ''
+    try {
+      host = new URL(b).hostname
+    } catch {
+      // sanitize 已过滤坏地址，这里仍保持防御性处理。
+    }
+    if (b && !RETIRED_API_HOSTS.has(host) && !merged.includes(b)) merged.push(b)
   }
   return merged
 }
@@ -66,6 +67,35 @@ const normalizeProxy = (value: unknown): string => {
   if (typeof value !== 'string') return ''
   const v = value.trim()
   return /^(https?|socks5h?):\/\//.test(v) ? v : ''
+}
+
+const isOfficialTlsUrl = (url: string): boolean => {
+  try {
+    return /(^|\.)sxnn\.de$/.test(new URL(url).hostname)
+  } catch {
+    return false
+  }
+}
+
+// Windows 上 Tauri/Rust 的平台证书库可能暂时不认识新签发的 YE2 链。
+// 先执行完整 TLS 校验；仅在失败时对固定官方域名兼容重试，且仍校验主机名。
+export const fetchWithOfficialTlsFallback = async (
+  url: string,
+  init: Parameters<typeof tauriFetch>[1],
+): ReturnType<typeof tauriFetch> => {
+  try {
+    return await tauriFetch(url, init)
+  } catch (error) {
+    if (!isOfficialTlsUrl(url)) throw error
+    return tauriFetch(url, {
+      ...init,
+      danger: {
+        ...init?.danger,
+        acceptInvalidCerts: true,
+        acceptInvalidHostnames: false,
+      },
+    })
+  }
 }
 
 const sanitize = (data: unknown): Endpoints | null => {
@@ -111,7 +141,7 @@ const fetchDiscovery = async (url: string): Promise<Endpoints> => {
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), 4000)
   try {
-    const res = await tauriFetch(url, {
+    const res = await fetchWithOfficialTlsFallback(url, {
       method: 'GET',
       signal: ctrl.signal,
       headers: { 'Cache-Control': 'no-cache' },
@@ -145,7 +175,7 @@ const probeOnce = async (
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), timeout)
   try {
-    const res = await tauriFetch(url, {
+    const res = await fetchWithOfficialTlsFallback(url, {
       method: 'GET',
       signal: ctrl.signal,
       ...(proxyUrl ? { proxy: { all: proxyUrl } } : {}),
@@ -181,19 +211,13 @@ const firstReachable = async (
   bases: string[],
   proxyUrl?: string,
 ): Promise<string | null> => {
-  try {
-    return await Promise.any(
-      bases.map(async (base) => {
-        if (await reachable(base, proxyUrl)) return base
-        throw new Error(`${base} is unreachable`)
-      }),
-    )
-  } catch {
-    return null
-  }
+  const results = await Promise.all(
+    bases.map((base) => reachable(base, proxyUrl)),
+  )
+  return bases.find((_, index) => results[index]) ?? null
 }
 
-/** 并发探测 api_bases，使用最先响应的可用线路。proxyUrl=内核混合端口（可选兜底）。 */
+/** 并发探测 api_bases，按列表优先级选择可用线路。proxyUrl=内核混合端口（可选兜底）。 */
 export const pickApiBase = async (proxyUrl?: string): Promise<string> => {
   const base = await firstReachable(allApiBases(), proxyUrl)
   if (base) {
@@ -203,10 +227,10 @@ export const pickApiBase = async (proxyUrl?: string): Promise<string> => {
   return getApiBase()
 }
 
-/** 当前全部候选线路 = 写死主线路(神仙云1/2) + 发现的 api_bases(神仙云3/4…)。 */
+/** 当前候选线路 = 国内主线路 + 国外/内穿兜底；旧域名已排除。 */
 export const listApiBases = (): string[] => allApiBases()
 
-/** 写死的主线路条数（神仙云1/2），UI 用来判断"前两条是否都不通"。 */
+/** 国内主线路条数，UI 仅在国内主线路失败时显示兜底线路。 */
 export const pinnedCount = (): number => PINNED_API_BASES.length
 
 /** 探测单条线路是否可用。proxyUrl=内核混合端口（可选兜底）。 */
@@ -239,7 +263,9 @@ export const rotateApiBase = async (proxyUrl?: string): Promise<string> => {
 export const initEndpointDiscovery = async (
   proxyUrl?: string,
 ): Promise<void> => {
-  // 先探测内置主线路，让首屏和提取码导入不等待发现源；发现结果随后补充线路。
+  // 覆盖旧版本保存的国外/内穿选择，启动瞬间即使用国内主域名。
+  localStorage.setItem(ACTIVE_BASE_KEY, DEFAULT_API_BASE)
+  // 所有候选并发检测，但结果始终按国内主域名优先选取。
   await pickApiBase(proxyUrl)
   await refreshEndpoints()
   await pickApiBase(proxyUrl)

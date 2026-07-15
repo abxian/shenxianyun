@@ -77,6 +77,7 @@ import {
 } from '@/services/cmds'
 import delayManager from '@/services/delay'
 import {
+  fetchWithOfficialTlsFallback,
   getApiBase,
   getBootstrapProxy,
   initEndpointDiscovery,
@@ -130,8 +131,8 @@ const buildExpiredProfileYaml = () =>
     // 占位期间仍能探测到续费并自动恢复；其余流量全部走不可达的占位节点（无法上网）。
     rules: [...officialDirectRules(), 'MATCH,节点选择'],
   })
-const DESKTOP_VERSION = '2.5.24'
-const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.24'
+const DESKTOP_VERSION = '2.5.25'
+const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.25'
 const DESKTOP_PLATFORM = getSystem()
 const fieldSx = {
   '& .MuiInputLabel-root': {
@@ -548,6 +549,7 @@ const HomePage = () => {
   const [desktopUpdate, setDesktopUpdate] =
     useState<DesktopVersionResponse | null>(null)
   const [busy, setBusy] = useState(false)
+  const [modeOverride, setModeOverride] = useState('')
   const [updating, setUpdating] = useState(false)
   const [updPercent, setUpdPercent] = useState(0)
   const { updateInfo } = useUpdate(true)
@@ -623,7 +625,7 @@ const HomePage = () => {
     if (current && nodes.some((node) => node.name === current)) return current
     return nodes[0]?.name || ''
   }, [nodes, primaryGroup])
-  const mode = (clashConfig?.mode || 'rule').toLowerCase()
+  const mode = (modeOverride || clashConfig?.mode || 'rule').toLowerCase()
   const tunOn = verge?.enable_tun_mode || false
   const proxyStateMismatch = systemProxyConfigOn && !systemProxyOn
   const running = tunOn || systemProxyOn
@@ -669,13 +671,16 @@ const HomePage = () => {
       init: Parameters<typeof tauriFetch>[1],
     ): ReturnType<typeof tauriFetch> => {
       try {
-        return await tauriFetch(url, init)
+        return await fetchWithOfficialTlsFallback(url, init)
       } catch (err) {
         // 第 2 层：内核混合端口（在跑时）或系统代理
         const p = proxyUrlRef.current
         if (p) {
           try {
-            return await tauriFetch(url, { ...init, proxy: { all: p } })
+            return await fetchWithOfficialTlsFallback(url, {
+              ...init,
+              proxy: { all: p },
+            })
           } catch {
             // 落到第 3 层
           }
@@ -683,7 +688,10 @@ const HomePage = () => {
         // 第 3 层：后台下发的兜底代理（bootstrap_proxy），最后一条路
         const boot = getBootstrapProxy()
         if (boot && boot !== p) {
-          return await tauriFetch(url, { ...init, proxy: { all: boot } })
+          return await fetchWithOfficialTlsFallback(url, {
+            ...init,
+            proxy: { all: boot },
+          })
         }
         throw err
       }
@@ -802,7 +810,7 @@ const HomePage = () => {
         client_id: getClientId(),
         platform: 'Windows电脑',
         app_name: '神仙云桌面端',
-        app_version: '2.5.24',
+        app_version: '2.5.25',
         device_name: navigator.userAgent,
       })
       const response = await apiFetch(
@@ -870,7 +878,7 @@ const HomePage = () => {
           client_id: getClientId(),
           platform: 'Windows电脑',
           app_name: '神仙云桌面端',
-          app_version: '2.5.24',
+          app_version: '2.5.25',
           device_name: navigator.userAgent,
           upload_bytes: uploadDelta,
           download_bytes: downloadDelta,
@@ -1128,8 +1136,7 @@ const HomePage = () => {
     setActiveLine(getApiBase())
   }, [])
 
-  // 线路条只在「神仙云1 和 神仙云2（写死的国内+国外主线路）都探测失败」时才显示，
-  // 让用户手动切到神仙云3/4;平时两条主线路任一可用就隐藏，界面保持极简。
+  // 国内主线路正常时隐藏其它线路；仅国内失败才显示国外/内穿兜底入口。
   const showLineBar = useMemo(() => {
     const pinned = lines.slice(0, pinnedCount())
     return pinned.length >= pinnedCount() && pinned.every((l) => l.ok === false)
@@ -1561,11 +1568,31 @@ const HomePage = () => {
   const changeMode = useLockFn(async (_: unknown, value: string | null) => {
     if (!value || value === mode) return
     setBusy(true)
+    setModeOverride(value)
     try {
       await patchClashMode(value)
-      await refreshClashConfig()
+      // 控制器在模式切换后会短暂刷新，立即读取可能得到
+      // no.url.provided.local。延迟重试，但不把读取抖动当成切换失败。
+      let confirmed = false
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)))
+        const result = await refreshClashConfig().catch(() => undefined)
+        const actual = result?.data?.mode?.toLowerCase()
+        if (actual === value) {
+          confirmed = true
+          setModeOverride('')
+          break
+        }
+      }
+      if (!confirmed) {
+        // Rust 命令已确认 PATCH 与持久化成功，保留即时高亮；后续数据刷新会接管。
+        window.setTimeout(() => {
+          refreshClashConfig().catch(() => undefined)
+        }, 1500)
+      }
       setStatus(value === 'global' ? '已切换全局模式' : '已切换规则模式')
     } catch (error) {
+      setModeOverride('')
       setStatus(error instanceof Error ? error.message : String(error))
     } finally {
       setBusy(false)

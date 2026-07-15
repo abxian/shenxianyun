@@ -1,10 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import dayjs from 'dayjs'
-import {
-  getBaseConfig,
-  getProxies,
-  getProxyProviders,
-} from 'tauri-plugin-mihomo-api'
+import { getProxies, getProxyProviders } from 'tauri-plugin-mihomo-api'
 
 import { showNotice } from '@/services/notice-service'
 import { debugLog } from '@/utils/debug'
@@ -123,17 +119,11 @@ export async function patchClashConfig(payload: Partial<IConfigData>) {
 }
 
 export async function patchClashMode(payload: string) {
+  // Rust 命令已将 Mihomo PATCH 和持久化错误返回前端。这里不立即读取
+  // getBaseConfig，避免控制器刷新瞬间出现 no.url.provided.local 假错误。
   await invoke<void>('patch_clash_mode', { payload })
-
-  // 内核 PATCH 返回后再读取运行时状态，避免配置缓存尚未刷新时 UI 仍高亮旧模式。
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const runtime = await getBaseConfig()
-    if (runtime?.mode?.toLowerCase() === payload.toLowerCase()) return
-    await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)))
-  }
-  throw new Error(
-    `内核未确认切换到${payload === 'global' ? '全局' : '规则'}模式`,
-  )
+  // 给 Mihomo 控制器更新监听地址留出时间，调用方随后刷新不会撞上空地址。
+  await new Promise((resolve) => setTimeout(resolve, 250))
 }
 
 export async function syncTrayProxySelection() {
