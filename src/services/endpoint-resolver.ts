@@ -69,34 +69,11 @@ const normalizeProxy = (value: unknown): string => {
   return /^(https?|socks5h?):\/\//.test(v) ? v : ''
 }
 
-const isOfficialTlsUrl = (url: string): boolean => {
-  try {
-    return /(^|\.)sxnn\.de$/.test(new URL(url).hostname)
-  } catch {
-    return false
-  }
-}
-
-// Windows 上 Tauri/Rust 的平台证书库可能暂时不认识新签发的 YE2 链。
-// 先执行完整 TLS 校验；仅在失败时对固定官方域名兼容重试，且仍校验主机名。
-export const fetchWithOfficialTlsFallback = async (
+// 所有官方接口都执行完整 TLS 校验，不在客户端绕过无效证书。
+export const fetchWithVerifiedTls = async (
   url: string,
   init: Parameters<typeof tauriFetch>[1],
-): ReturnType<typeof tauriFetch> => {
-  try {
-    return await tauriFetch(url, init)
-  } catch (error) {
-    if (!isOfficialTlsUrl(url)) throw error
-    return tauriFetch(url, {
-      ...init,
-      danger: {
-        ...init?.danger,
-        acceptInvalidCerts: true,
-        acceptInvalidHostnames: false,
-      },
-    })
-  }
-}
+): ReturnType<typeof tauriFetch> => tauriFetch(url, init)
 
 const sanitize = (data: unknown): Endpoints | null => {
   if (!data || typeof data !== 'object') return null
@@ -141,7 +118,7 @@ const fetchDiscovery = async (url: string): Promise<Endpoints> => {
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), 4000)
   try {
-    const res = await fetchWithOfficialTlsFallback(url, {
+    const res = await fetchWithVerifiedTls(url, {
       method: 'GET',
       signal: ctrl.signal,
       headers: { 'Cache-Control': 'no-cache' },
@@ -175,7 +152,7 @@ const probeOnce = async (
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), timeout)
   try {
-    const res = await fetchWithOfficialTlsFallback(url, {
+    const res = await fetchWithVerifiedTls(url, {
       method: 'GET',
       signal: ctrl.signal,
       ...(proxyUrl ? { proxy: { all: proxyUrl } } : {}),

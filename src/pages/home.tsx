@@ -77,7 +77,7 @@ import {
 } from '@/services/cmds'
 import delayManager from '@/services/delay'
 import {
-  fetchWithOfficialTlsFallback,
+  fetchWithVerifiedTls,
   getApiBase,
   getBootstrapProxy,
   initEndpointDiscovery,
@@ -131,8 +131,8 @@ const buildExpiredProfileYaml = () =>
     // 占位期间仍能探测到续费并自动恢复；其余流量全部走不可达的占位节点（无法上网）。
     rules: [...officialDirectRules(), 'MATCH,节点选择'],
   })
-const DESKTOP_VERSION = '2.5.25'
-const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.25'
+const DESKTOP_VERSION = '2.5.26-rc.1'
+const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.26-rc.1'
 const DESKTOP_PLATFORM = getSystem()
 const fieldSx = {
   '& .MuiInputLabel-root': {
@@ -671,13 +671,13 @@ const HomePage = () => {
       init: Parameters<typeof tauriFetch>[1],
     ): ReturnType<typeof tauriFetch> => {
       try {
-        return await fetchWithOfficialTlsFallback(url, init)
+        return await fetchWithVerifiedTls(url, init)
       } catch (err) {
         // 第 2 层：内核混合端口（在跑时）或系统代理
         const p = proxyUrlRef.current
         if (p) {
           try {
-            return await fetchWithOfficialTlsFallback(url, {
+            return await fetchWithVerifiedTls(url, {
               ...init,
               proxy: { all: p },
             })
@@ -688,7 +688,7 @@ const HomePage = () => {
         // 第 3 层：后台下发的兜底代理（bootstrap_proxy），最后一条路
         const boot = getBootstrapProxy()
         if (boot && boot !== p) {
-          return await fetchWithOfficialTlsFallback(url, {
+          return await fetchWithVerifiedTls(url, {
             ...init,
             proxy: { all: boot },
           })
@@ -810,7 +810,7 @@ const HomePage = () => {
         client_id: getClientId(),
         platform: 'Windows电脑',
         app_name: '神仙云桌面端',
-        app_version: '2.5.25',
+        app_version: DESKTOP_VERSION,
         device_name: navigator.userAgent,
       })
       const response = await apiFetch(
@@ -878,7 +878,7 @@ const HomePage = () => {
           client_id: getClientId(),
           platform: 'Windows电脑',
           app_name: '神仙云桌面端',
-          app_version: '2.5.25',
+          app_version: DESKTOP_VERSION,
           device_name: navigator.userAgent,
           upload_bytes: uploadDelta,
           download_bytes: downloadDelta,

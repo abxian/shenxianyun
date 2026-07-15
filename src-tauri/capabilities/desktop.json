@@ -19,11 +19,14 @@
     "autostart:allow-is-enabled",
     "core:window:allow-set-theme",
     "notification:default",
-    "http:default",
-    "http:allow-fetch",
     {
       "identifier": "http:default",
-      "allow": [{ "url": "https://*/*" }, { "url": "http://*/*" }]
+      "allow": [
+        { "url": "https://*/*" },
+        { "url": "http://*/*" },
+        { "url": "https://*:*/*" },
+        { "url": "http://*:*/*" }
+      ]
     },
     "mihomo:default"
   ]
