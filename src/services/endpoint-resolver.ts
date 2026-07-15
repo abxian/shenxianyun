@@ -15,12 +15,19 @@ export const PINNED_API_BASES = [
   'https://api.sxnn.de:5443', // 神仙云1 国内直连
   'https://sxnn.de', // 神仙云2 国外(CF)
 ]
+
+// 固定保留线路：内穿裸地址 + 旧域名。覆盖安装后的旧数据仍可继续使用，
+// 主线路故障时也不依赖 endpoints.json 才能找到兜底入口。
+export const RESERVED_API_BASES = [
+  'http://114.80.36.225:5010',
+  'https://sub.jc116.com',
+]
 // 内置兜底默认值（发现源全挂时用第一条写死线路）
 export const DEFAULT_API_BASE = PINNED_API_BASES[0]
 
 // 完整线路列表 = 写死主线路(神仙云1/2) + 发现到的 api_bases(神仙云3/4…, 去重, 排后面)
 const allApiBases = (): string[] => {
-  const merged = [...PINNED_API_BASES]
+  const merged = [...PINNED_API_BASES, ...RESERVED_API_BASES]
   for (const b of readCache()?.api_bases ?? []) {
     if (b && !merged.includes(b)) merged.push(b)
   }
@@ -100,25 +107,33 @@ export const getEndpoints = (): Endpoints | null => readCache()
 export const getBootstrapProxy = (): string =>
   normalizeProxy(readCache()?.bootstrap_proxy)
 
-/** 拉取发现源（依次尝试，8s 超时），成功则缓存。失败静默返回缓存/null。 */
-export const refreshEndpoints = async (): Promise<Endpoints | null> => {
-  for (const url of DISCOVERY_URLS) {
-    try {
-      const ctrl = new AbortController()
-      const t = setTimeout(() => ctrl.abort(), 8000)
-      const res = await tauriFetch(url, { method: 'GET', signal: ctrl.signal })
-      clearTimeout(t)
-      if (!res.ok) continue
-      const parsed = sanitize(await res.json())
-      if (parsed) {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
-        return parsed
-      }
-    } catch {
-      // 下一个发现源
-    }
+const fetchDiscovery = async (url: string): Promise<Endpoints> => {
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), 4000)
+  try {
+    const res = await tauriFetch(url, {
+      method: 'GET',
+      signal: ctrl.signal,
+      headers: { 'Cache-Control': 'no-cache' },
+    })
+    if (!res.ok) throw new Error(`discovery HTTP ${res.status}`)
+    const parsed = sanitize(await res.json())
+    if (!parsed) throw new Error('invalid discovery payload')
+    return parsed
+  } finally {
+    clearTimeout(t)
   }
-  return readCache()
+}
+
+/** 并发拉取发现源，取第一个有效响应。发现失败不阻塞内置主线路。 */
+export const refreshEndpoints = async (): Promise<Endpoints | null> => {
+  try {
+    const parsed = await Promise.any(DISCOVERY_URLS.map(fetchDiscovery))
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
+    return parsed
+  } catch {
+    return readCache()
+  }
 }
 
 // 一次 GET 探测：proxyUrl 传入时经该代理（软件内核混合端口）出网，否则本机直连。
@@ -147,22 +162,43 @@ const probeOnce = async (
 // 再经内核端口重试一次——内核带 sxnn.de/jc116.com 直连规则，能绕开系统级
 // OpenClash/fake-ip 把自家服务器误路由到国外节点的问题。任一成功即可用。
 const reachable = async (base: string, proxyUrl?: string): Promise<boolean> => {
-  const url = `${base}/api/app-version`
-  if (await probeOnce(url, undefined, 7000)) return true
-  if (proxyUrl && (await probeOnce(url, proxyUrl, 7000))) return true
-  // 最后一档：后台下发的兜底代理
+  const url = `${base}/api/app-version?_=${Date.now()}`
+  if (await probeOnce(url, undefined, 3500)) return true
+
+  // 直连失败后并发尝试内核代理和后台兜底，避免串行等待 14 秒。
   const boot = getBootstrapProxy()
-  if (boot && boot !== proxyUrl && (await probeOnce(url, boot, 7000))) return true
-  return false
+  const fallbacks = [proxyUrl, boot]
+    .filter((value): value is string => Boolean(value))
+    .filter((value, index, values) => values.indexOf(value) === index)
+  if (!fallbacks.length) return false
+  const results = await Promise.all(
+    fallbacks.map((proxy) => probeOnce(url, proxy, 4000)),
+  )
+  return results.some(Boolean)
 }
 
-/** 逐个探测 api_bases，第一个通的设为 active。proxyUrl=内核混合端口（可选兜底）。 */
+const firstReachable = async (
+  bases: string[],
+  proxyUrl?: string,
+): Promise<string | null> => {
+  try {
+    return await Promise.any(
+      bases.map(async (base) => {
+        if (await reachable(base, proxyUrl)) return base
+        throw new Error(`${base} is unreachable`)
+      }),
+    )
+  } catch {
+    return null
+  }
+}
+
+/** 并发探测 api_bases，使用最先响应的可用线路。proxyUrl=内核混合端口（可选兜底）。 */
 export const pickApiBase = async (proxyUrl?: string): Promise<string> => {
-  for (const base of allApiBases()) {
-    if (await reachable(base, proxyUrl)) {
-      localStorage.setItem(ACTIVE_BASE_KEY, base)
-      return base
-    }
+  const base = await firstReachable(allApiBases(), proxyUrl)
+  if (base) {
+    localStorage.setItem(ACTIVE_BASE_KEY, base)
+    return base
   }
   return getApiBase()
 }
@@ -188,17 +224,23 @@ export const setActiveApiBase = (base: string): void => {
 /** 请求失败时调用：把当前 active 基址作废并顺延到下一个候选，返回新基址。 */
 export const rotateApiBase = async (proxyUrl?: string): Promise<string> => {
   const bad = getApiBase()
-  for (const base of allApiBases().filter((b) => b !== bad)) {
-    if (await reachable(base, proxyUrl)) {
-      localStorage.setItem(ACTIVE_BASE_KEY, base)
-      return base
-    }
+  const base = await firstReachable(
+    allApiBases().filter((candidate) => candidate !== bad),
+    proxyUrl,
+  )
+  if (base) {
+    localStorage.setItem(ACTIVE_BASE_KEY, base)
+    return base
   }
   return bad
 }
 
 /** 启动时调用一次：刷新发现源 + 探测可用基址（后台执行，不阻塞 UI）。 */
-export const initEndpointDiscovery = async (proxyUrl?: string): Promise<void> => {
+export const initEndpointDiscovery = async (
+  proxyUrl?: string,
+): Promise<void> => {
+  // 先探测内置主线路，让首屏和提取码导入不等待发现源；发现结果随后补充线路。
+  await pickApiBase(proxyUrl)
   await refreshEndpoints()
   await pickApiBase(proxyUrl)
 }

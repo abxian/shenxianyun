@@ -1,6 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import dayjs from 'dayjs'
-import { getProxies, getProxyProviders } from 'tauri-plugin-mihomo-api'
+import {
+  getBaseConfig,
+  getProxies,
+  getProxyProviders,
+} from 'tauri-plugin-mihomo-api'
 
 import { showNotice } from '@/services/notice-service'
 import { debugLog } from '@/utils/debug'
@@ -119,7 +123,17 @@ export async function patchClashConfig(payload: Partial<IConfigData>) {
 }
 
 export async function patchClashMode(payload: string) {
-  return invoke<void>('patch_clash_mode', { payload })
+  await invoke<void>('patch_clash_mode', { payload })
+
+  // 内核 PATCH 返回后再读取运行时状态，避免配置缓存尚未刷新时 UI 仍高亮旧模式。
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const runtime = await getBaseConfig()
+    if (runtime?.mode?.toLowerCase() === payload.toLowerCase()) return
+    await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)))
+  }
+  throw new Error(
+    `内核未确认切换到${payload === 'global' ? '全局' : '规则'}模式`,
+  )
 }
 
 export async function syncTrayProxySelection() {

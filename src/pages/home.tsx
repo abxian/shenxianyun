@@ -39,19 +39,20 @@ import {
 import { invoke } from '@tauri-apps/api/core'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 import { relaunch } from '@tauri-apps/plugin-process'
-import { getVersion } from 'tauri-plugin-mihomo-api'
 import { useLockFn } from 'ahooks'
 import yaml from 'js-yaml'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { getVersion } from 'tauri-plugin-mihomo-api'
 
 import { BasePage } from '@/components/base'
+import { EditorViewer } from '@/components/profile/editor-viewer'
 import { useClash } from '@/hooks/use-clash'
-import { useUpdate } from '@/hooks/use-update'
 import { useConnectionData } from '@/hooks/use-connection-data'
 import { useProfiles } from '@/hooks/use-profiles'
 import { useProxySelection } from '@/hooks/use-proxy-selection'
 import { useSystemProxyState } from '@/hooks/use-system-proxy-state'
 import { useSystemState } from '@/hooks/use-system-state'
+import { useUpdate } from '@/hooks/use-update'
 import { useVerge } from '@/hooks/use-verge'
 import { useAppData } from '@/providers/app-data-context'
 import {
@@ -63,6 +64,7 @@ import {
   installService,
   openWebUrl,
   patchClashMode,
+  patchProfile,
   patchProfilesConfig,
   readProfileFile,
   restartCore,
@@ -73,7 +75,6 @@ import {
   deleteProfile,
   updateProfile,
 } from '@/services/cmds'
-import { EditorViewer } from '@/components/profile/editor-viewer'
 import delayManager from '@/services/delay'
 import {
   getApiBase,
@@ -97,6 +98,8 @@ const EXPIRED_PROFILE_UID_KEY = 'shenxianyun.expiredProfileUid'
 // 「提取码订阅」对应的配置 UID。切码/恢复时只替换这一张，保留用户手动导入/新建的其它配置。
 const CODE_PROFILE_UID_KEY = 'shenxianyun.codeProfileUid'
 const DELAY_TIMEOUT = 5000
+// 服务端以 3 分钟内 last_seen 判断在线，60 秒心跳留足网络抖动余量。
+const HEARTBEAT_INTERVAL_MS = 60_000
 const TRAFFIC_REPORT_INTERVAL_MS = 300_000
 const MAX_TRAFFIC_REPORT_DELTA = 5 * 1024 * 1024 * 1024
 // 订阅更新轮询：仅在已连接时运行，基础间隔 10 分钟，失败时指数退避到最多 1 小时。
@@ -127,8 +130,8 @@ const buildExpiredProfileYaml = () =>
     // 占位期间仍能探测到续费并自动恢复；其余流量全部走不可达的占位节点（无法上网）。
     rules: [...officialDirectRules(), 'MATCH,节点选择'],
   })
-const DESKTOP_VERSION = '2.5.23'
-const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.23'
+const DESKTOP_VERSION = '2.5.24'
+const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.24'
 const DESKTOP_PLATFORM = getSystem()
 const fieldSx = {
   '& .MuiInputLabel-root': {
@@ -283,10 +286,7 @@ const DEFAULT_DNS_CONFIG = {
     'www.msftconnecttest.com',
   ],
   'default-nameserver': ['system', '223.6.6.6', '8.8.8.8'],
-  nameserver: [
-    'https://doh.pub/dns-query',
-    'https://dns.alidns.com/dns-query',
-  ],
+  nameserver: ['https://doh.pub/dns-query', 'https://dns.alidns.com/dns-query'],
   fallback: [],
   'proxy-server-nameserver': [
     'https://doh.pub/dns-query',
@@ -568,18 +568,25 @@ const HomePage = () => {
     let total = 0
     let downloaded = 0
     try {
-      await updateInfo.downloadAndInstall((event: { event: string; data?: { contentLength?: number; chunkLength?: number } }) => {
-        if (event.event === 'Started') {
-          total = event.data?.contentLength ?? 0
-        } else if (event.event === 'Progress') {
-          downloaded += event.data?.chunkLength ?? 0
-          if (total > 0) {
-            setUpdPercent(Math.min(99, Math.round((downloaded / total) * 100)))
+      await updateInfo.downloadAndInstall(
+        (event: {
+          event: string
+          data?: { contentLength?: number; chunkLength?: number }
+        }) => {
+          if (event.event === 'Started') {
+            total = event.data?.contentLength ?? 0
+          } else if (event.event === 'Progress') {
+            downloaded += event.data?.chunkLength ?? 0
+            if (total > 0) {
+              setUpdPercent(
+                Math.min(99, Math.round((downloaded / total) * 100)),
+              )
+            }
+          } else if (event.event === 'Finished') {
+            setUpdPercent(100)
           }
-        } else if (event.event === 'Finished') {
-          setUpdPercent(100)
-        }
-      })
+        },
+      )
       setStatus('更新完成，正在重启...')
       await relaunch()
     } catch (error) {
@@ -593,6 +600,8 @@ const HomePage = () => {
   const [nowMs, setNowMs] = useState(() => Date.now())
   const trafficTotalsRef = useRef({ upload: 0, download: 0 })
   const lastReportedTrafficRef = useRef({ upload: 0, download: 0 })
+  const proxyUrlRef = useRef('')
+  const legacyMigrationRef = useRef('')
 
   const primaryGroup = useMemo(
     () => pickPrimaryGroup((proxies?.groups || []) as IProxyGroupItem[]),
@@ -600,9 +609,9 @@ const HomePage = () => {
   )
   const nodes = useMemo(() => {
     void delaySortTick
-    return (primaryGroup?.all || [])
+    return [...(primaryGroup?.all || [])]
       .filter((proxy) => !['DIRECT', 'REJECT'].includes(proxy.name))
-      .toSorted(
+      .sort(
         (a, b) =>
           delayRank(a, primaryGroup?.name) - delayRank(b, primaryGroup?.name),
       )
@@ -654,57 +663,60 @@ const HomePage = () => {
   }, [nodes, primaryGroup?.name, selectedNode])
   // 统一的 API 请求兜底链：直连 → 内核端口/系统代理 → 后台配置的兜底代理。
   // 逐层重试，解决 OpenClash/fake-ip 误路由、首装用户连不上 web 验证提取码的问题。
-  const apiFetch = async (
-    url: string,
-    init: Parameters<typeof tauriFetch>[1],
-  ): ReturnType<typeof tauriFetch> => {
-    try {
-      return await tauriFetch(url, init)
-    } catch (err) {
-      // 第 2 层：内核混合端口（在跑时）或系统代理
-      const p = proxyUrlRef.current
-      if (p) {
-        try {
-          return await tauriFetch(url, { ...init, proxy: { all: p } })
-        } catch {
-          // 落到第 3 层
+  const apiFetch = useCallback(
+    async (
+      url: string,
+      init: Parameters<typeof tauriFetch>[1],
+    ): ReturnType<typeof tauriFetch> => {
+      try {
+        return await tauriFetch(url, init)
+      } catch (err) {
+        // 第 2 层：内核混合端口（在跑时）或系统代理
+        const p = proxyUrlRef.current
+        if (p) {
+          try {
+            return await tauriFetch(url, { ...init, proxy: { all: p } })
+          } catch {
+            // 落到第 3 层
+          }
         }
+        // 第 3 层：后台下发的兜底代理（bootstrap_proxy），最后一条路
+        const boot = getBootstrapProxy()
+        if (boot && boot !== p) {
+          return await tauriFetch(url, { ...init, proxy: { all: boot } })
+        }
+        throw err
       }
-      // 第 3 层：后台下发的兜底代理（bootstrap_proxy），最后一条路
-      const boot = getBootstrapProxy()
-      if (boot && boot !== p) {
-        return await tauriFetch(url, { ...init, proxy: { all: boot } })
-      }
-      throw err
-    }
-  }
+    },
+    [],
+  )
 
-  const verifyCode = async (
-    input: string,
-    countImport = true,
-  ): Promise<ValidVerifyResponse> => {
-    const params = new URLSearchParams({
-      client_id: getClientId(),
-    })
-    if (countImport) params.set('import', '1')
-    const response = await apiFetch(
-      `${getApiBase()}/api/verify/${encodeURIComponent(input)}?${params.toString()}`,
-      {
-        method: 'GET',
-        connectTimeout: 8000,
-        headers: {
-          'User-Agent': CLIENT_UA,
-          'X-Client-Id': getClientId(),
-          'X-Client-Type': 'shenxianyun-windows',
+  const verifyCode = useCallback(
+    async (input: string, countImport = true): Promise<ValidVerifyResponse> => {
+      const params = new URLSearchParams({
+        client_id: getClientId(),
+      })
+      if (countImport) params.set('import', '1')
+      const response = await apiFetch(
+        `${getApiBase()}/api/verify/${encodeURIComponent(input)}?${params.toString()}`,
+        {
+          method: 'GET',
+          connectTimeout: 8000,
+          headers: {
+            'User-Agent': CLIENT_UA,
+            'X-Client-Id': getClientId(),
+            'X-Client-Type': 'shenxianyun-windows',
+          },
         },
-      },
-    )
-    const data = (await response.json()) as VerifyResponse
-    if (!response.ok || !data.ok || !data.subscription_url) {
-      throw new Error(data.message || '提取码验证失败')
-    }
-    return { ...data, subscription_url: data.subscription_url }
-  }
+      )
+      const data = (await response.json()) as VerifyResponse
+      if (!response.ok || !data.ok || !data.subscription_url) {
+        throw new Error(data.message || '提取码验证失败')
+      }
+      return { ...data, subscription_url: data.subscription_url }
+    },
+    [apiFetch],
+  )
 
   const updateState = useCallback(
     async (input: string): Promise<UpdateStateResponse> => {
@@ -732,7 +744,7 @@ const HomePage = () => {
       }
       return data
     },
-    [],
+    [apiFetch],
   )
 
   const checkDesktopUpdate = useCallback(async () => {
@@ -790,10 +802,10 @@ const HomePage = () => {
         client_id: getClientId(),
         platform: 'Windows电脑',
         app_name: '神仙云桌面端',
-        app_version: '2.5.23',
+        app_version: '2.5.24',
         device_name: navigator.userAgent,
       })
-      await tauriFetch(
+      const response = await apiFetch(
         `${getApiBase()}/api/client/${endpoint}/${encodeURIComponent(value)}?${params.toString()}`,
         {
           method: 'GET',
@@ -804,9 +816,18 @@ const HomePage = () => {
             'X-Client-Type': 'shenxianyun-windows',
           },
         },
-      ).catch(() => undefined)
+      )
+      const data = (await response.json().catch(() => null)) as {
+        ok?: boolean
+        message?: string
+      } | null
+      if (!response.ok || !data?.ok) {
+        throw new Error(
+          data?.message || `客户端${online ? '心跳' : '离线'}上报失败`,
+        )
+      }
     },
-    [savedCode],
+    [apiFetch, savedCode],
   )
 
   const reportClientTraffic = useCallback(async () => {
@@ -834,7 +855,7 @@ const HomePage = () => {
       return
     }
 
-    await tauriFetch(
+    const response = await apiFetch(
       `${getApiBase()}/api/client/traffic/${encodeURIComponent(value)}`,
       {
         method: 'POST',
@@ -849,18 +870,23 @@ const HomePage = () => {
           client_id: getClientId(),
           platform: 'Windows电脑',
           app_name: '神仙云桌面端',
-          app_version: '2.5.23',
+          app_version: '2.5.24',
           device_name: navigator.userAgent,
           upload_bytes: uploadDelta,
           download_bytes: downloadDelta,
         }),
       },
     )
-      .then(() => {
-        lastReportedTrafficRef.current = current
-      })
-      .catch(() => undefined)
-  }, [running, savedCode])
+    const data = (await response.json().catch(() => null)) as {
+      ok?: boolean
+      message?: string
+    } | null
+    if (!response.ok || !data?.ok) {
+      throw new Error(data?.message || '客户端流量上报失败')
+    }
+    // 只有服务端明确确认成功才推进基线，失败增量留到下一轮重试。
+    lastReportedTrafficRef.current = current
+  }, [apiFetch, running, savedCode])
 
   const activateCode = async (value: string, retryCount = 3) => {
     let lastError: unknown
@@ -919,7 +945,9 @@ const HomePage = () => {
         lastError = error
         if (attempt < retryCount) {
           // 重试前尝试切换到下一条可用 API 线路（当前线路可能已失联）。
-          await rotateApiBase(proxyUrlRef.current || undefined).catch(() => undefined)
+          await rotateApiBase(proxyUrlRef.current || undefined).catch(
+            () => undefined,
+          )
           setStatus(`订阅失败，正在重试 ${attempt}/${retryCount - 1}...`)
           await new Promise((resolve) => setTimeout(resolve, 1000 * attempt))
         }
@@ -998,32 +1026,7 @@ const HomePage = () => {
     await mutateProfiles()
     await refreshAll()
     return true
-  }, [savedCode, mutateProfiles, refreshAll])
-
-  const importByCode = useLockFn(async () => {
-    const value = code.trim()
-    if (!value) {
-      setStatus('请输入提取码')
-      return
-    }
-
-    setBusy(true)
-    setStatus(isSwitchingCode ? '正在切换提取码...' : '正在验证提取码...')
-    try {
-      const data = await activateCode(value)
-      setCode('')
-      setCodeDialogOpen(false)
-      setStatus(
-        `${isSwitchingCode ? '提取码已切换' : '订阅已导入'}${
-          data.expires_at ? `，到期 ${data.expires_at}` : ''
-        }`,
-      )
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error))
-    } finally {
-      setBusy(false)
-    }
-  })
+  }, [savedCode, mutateProfiles, refreshAll, verifyCode])
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 60_000)
@@ -1038,16 +1041,77 @@ const HomePage = () => {
     if (code && code !== savedCode) {
       localStorage.setItem(CODE_STORAGE_KEY, code)
       if (current?.uid) localStorage.setItem(CODE_PROFILE_UID_KEY, current.uid)
+      // 官网一键导入需要把 URL 中的提取码同步到组件状态。
+      // eslint-disable-next-line @eslint-react/set-state-in-effect
       setSavedCode(code)
     }
   }, [current?.uid, current?.url, savedCode])
 
+  // 覆盖安装会保留原来的 profile UID 和用户设置。旧 jc116 订阅失效时，
+  // 换取当前签名 URL 后原位更新，避免清空配置或产生重复订阅。
+  useEffect(() => {
+    if (!current?.uid || !current.url) return
+    const hostname = (() => {
+      try {
+        return new URL(current.url).hostname
+      } catch {
+        return ''
+      }
+    })()
+    if (!hostname) return
+    if (!/(^|\.)jc116\.com$/.test(hostname)) return
+
+    const value = extractCodeFromProfileUrl(current.url)
+    const migrationKey = `${current.uid}:${current.url}`
+    if (!value || legacyMigrationRef.current === migrationKey) return
+    legacyMigrationRef.current = migrationKey
+
+    void (async () => {
+      try {
+        setStatus('正在迁移旧版订阅地址...')
+        const data = await verifyCode(value, false)
+        if (data.subscription_url === current.url) return
+        const ruleSnapshot = await readRuleSnapshot(current.uid)
+        await patchProfile(current.uid, {
+          url: data.subscription_url,
+          option: {
+            ...current.option,
+            with_proxy: true,
+            allow_auto_update: false,
+          },
+        })
+        await updateProfile(current.uid, { with_proxy: true })
+        await restoreRuleSnapshot(current.uid, ruleSnapshot)
+        localStorage.setItem(CODE_STORAGE_KEY, value)
+        localStorage.setItem(CODE_PROFILE_UID_KEY, current.uid)
+        localStorage.setItem(CODE_EXPIRES_STORAGE_KEY, data.expires_at || '')
+        localStorage.setItem(
+          CODE_UPDATE_VERSION_STORAGE_KEY,
+          String(data.update_version || 0),
+        )
+        setSavedCode(value)
+        setExpiresAt(data.expires_at || '')
+        await mutateProfiles()
+        await refreshAll()
+        setStatus('旧版订阅已迁移并更新')
+      } catch (error) {
+        setStatus(
+          `旧版订阅迁移失败：${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    })()
+  }, [
+    current?.option,
+    current?.uid,
+    current?.url,
+    mutateProfiles,
+    refreshAll,
+    verifyCode,
+  ])
+
   // ===== 线路（web/api_bases 地址）状态条：显示线路1/2/3 连通状态，自动选可用，可手动点选 =====
   const [lines, setLines] = useState<{ base: string; ok: boolean | null }[]>([])
   const [activeLine, setActiveLine] = useState('')
-  // 内核混合端口的代理地址，随时更新；探测/验证直连失败时经它兜底出网。
-  const proxyUrlRef = useRef('')
-
   const refreshLines = useCallback(async () => {
     const bases = listApiBases()
     setLines(bases.map((base) => ({ base, ok: null })))
@@ -1108,11 +1172,6 @@ const HomePage = () => {
     return () => window.clearInterval(timer)
   }, [refreshLines])
 
-  // 自动切换（rotate）后让线路条跟着变
-  useEffect(() => {
-    setActiveLine(getApiBase())
-  }, [nowMs])
-
   useEffect(() => {
     // jc116 桌面版本检查已停用，改用 Tauri updater（GitHub releases 签名自动更新）
     // checkDesktopUpdate().catch(() => undefined)
@@ -1123,7 +1182,7 @@ const HomePage = () => {
     sendClientPresence(true).catch(() => undefined)
     const timer = window.setInterval(() => {
       sendClientPresence(true).catch(() => undefined)
-    }, 300_000)
+    }, HEARTBEAT_INTERVAL_MS)
     return () => {
       window.clearInterval(timer)
       sendClientPresence(false).catch(() => undefined)
@@ -1439,7 +1498,9 @@ const HomePage = () => {
       // 不再强制客户端必须输入提取码,否则一键导入的用户会被卡住无法启动。
       if (currentCode) {
         setStatus('正在检查提取码有效期...')
-        let expired = Boolean(expiresAt && Date.now() > parseExpireTime(expiresAt))
+        let expired = Boolean(
+          expiresAt && Date.now() > parseExpireTime(expiresAt),
+        )
 
         if (!expired) {
           try {
@@ -1546,8 +1607,7 @@ const HomePage = () => {
     Number(
       (clashConfig as { 'mixed-port'?: number; port?: number } | undefined)?.[
         'mixed-port'
-      ] ??
-        (clashConfig as { port?: number } | undefined)?.port,
+      ] ?? (clashConfig as { port?: number } | undefined)?.port,
     ) || 7897
   const proxyUrl = `http://127.0.0.1:${mixedPort}`
 
@@ -1613,6 +1673,83 @@ const HomePage = () => {
     [proxyUrl],
   )
 
+  const startImportedProfile = async () => {
+    const portAlive = async () =>
+      (await probe('https://www.baidu.com', true, 8000)) ||
+      (await probe('https://www.gstatic.com/generate_204', true, 8000))
+
+    setStatus('订阅已导入，正在启动并检查网络...')
+    if (proxyStateMismatch) await toggleSystemProxy(false).catch(() => {})
+    await startCore().catch(() => restartCore())
+    await mutateSystemState()
+
+    const useTun =
+      localStorage.getItem('SHENXIANYUN_POWER_START_TUN') === '1' &&
+      isTunModeAvailable
+    if (useTun) {
+      await patchVerge({ enable_tun_mode: true })
+      if (systemProxyOn || systemProxyConfigOn) {
+        await toggleSystemProxy(false)
+      }
+    } else {
+      if (tunOn) await patchVerge({ enable_tun_mode: false })
+      await toggleSystemProxy(true)
+    }
+    await invalidateProxyState()
+    await refreshAll()
+    await new Promise((resolve) => setTimeout(resolve, 800))
+
+    if (!(await portAlive())) {
+      setStatus('首次联网检查失败，正在自动重启内核...')
+      await restartCore()
+      if (!useTun) {
+        await toggleSystemProxy(false).catch(() => {})
+        await toggleSystemProxy(true)
+      }
+      await invalidateProxyState()
+      await new Promise((resolve) => setTimeout(resolve, 1200))
+    }
+
+    if (!(await portAlive())) {
+      await patchVerge({ enable_tun_mode: false }).catch(() => {})
+      await toggleSystemProxy(false).catch(() => {})
+      await stopCore().catch(() => {})
+      await invalidateProxyState().catch(() => {})
+      await refreshAll().catch(() => {})
+      throw new Error(
+        '订阅已导入，但代理联网检查失败；已关闭代理以恢复本机网络',
+      )
+    }
+
+    await sendClientPresence(true).catch(() => undefined)
+  }
+
+  const importByCode = useLockFn(async () => {
+    const value = code.trim()
+    if (!value) {
+      setStatus('请输入提取码')
+      return
+    }
+
+    setBusy(true)
+    setStatus(isSwitchingCode ? '正在切换提取码...' : '正在验证提取码...')
+    try {
+      const data = await activateCode(value)
+      await startImportedProfile()
+      setCode('')
+      setCodeDialogOpen(false)
+      setStatus(
+        `${isSwitchingCode ? '提取码已切换' : '订阅已导入'}，代理已启动且联网正常${
+          data.expires_at ? `，到期 ${data.expires_at}` : ''
+        }`,
+      )
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
+    }
+  })
+
   // 覆盖安装自愈：升级/覆盖安装后常见「系统代理已开但内核未真正就绪」→ 全系统断网。
   // 启动后延迟探测：系统代理已配置但经核心端口出不了网 → 自动重启内核并重设系统代理；
   // 仍不通则先关闭系统代理保住本机上网，提示用户自检。只在启动后自动执行一次。
@@ -1646,7 +1783,9 @@ const HomePage = () => {
       // 修不好：先把系统代理关掉，把上网能力还给用户，再引导自检。
       await toggleSystemProxy(false).catch(() => {})
       await invalidateProxyState().catch(() => {})
-      setStatus('代理端口不通，已暂时关闭系统代理恢复上网；请点「一键自检」排查或彻底重置')
+      setStatus(
+        '代理端口不通，已暂时关闭系统代理恢复上网；请点「一键自检」排查或彻底重置',
+      )
     }, 3000)
 
     return () => window.clearTimeout(timer)
@@ -1718,11 +1857,31 @@ const HomePage = () => {
     const steps: SelfCheckItem[] = [
       { key: 'core', label: '内核', status: 'pending', detail: '检测中…' },
       { key: 'mode', label: '运行模式', status: 'pending', detail: '检测中…' },
-      { key: 'service', label: '系统服务', status: 'pending', detail: '检测中…' },
-      { key: 'sysproxy', label: '系统代理', status: 'pending', detail: '检测中…' },
+      {
+        key: 'service',
+        label: '系统服务',
+        status: 'pending',
+        detail: '检测中…',
+      },
+      {
+        key: 'sysproxy',
+        label: '系统代理',
+        status: 'pending',
+        detail: '检测中…',
+      },
       { key: 'tun', label: 'TUN 网卡', status: 'pending', detail: '检测中…' },
-      { key: 'sub', label: '订阅 / 提取码', status: 'pending', detail: '检测中…' },
-      { key: 'proxymode', label: '代理模式', status: 'pending', detail: '检测中…' },
+      {
+        key: 'sub',
+        label: '订阅 / 提取码',
+        status: 'pending',
+        detail: '检测中…',
+      },
+      {
+        key: 'proxymode',
+        label: '代理模式',
+        status: 'pending',
+        detail: '检测中…',
+      },
       { key: 'node', label: '节点连通', status: 'pending', detail: '检测中…' },
       { key: 'lan', label: '本地网络', status: 'pending', detail: '检测中…' },
       {
@@ -1731,8 +1890,18 @@ const HomePage = () => {
         status: 'pending',
         detail: '检测中…',
       },
-      { key: 'domestic', label: '国内站点', status: 'pending', detail: '检测中…' },
-      { key: 'external', label: '国外站点', status: 'pending', detail: '检测中…' },
+      {
+        key: 'domestic',
+        label: '国内站点',
+        status: 'pending',
+        detail: '检测中…',
+      },
+      {
+        key: 'external',
+        label: '国外站点',
+        status: 'pending',
+        detail: '检测中…',
+      },
       { key: 'ipv6', label: 'IPv6 连通', status: 'pending', detail: '检测中…' },
     ]
     setSelfCheckItems(steps.map((s) => ({ ...s })))
@@ -1825,7 +1994,10 @@ const HomePage = () => {
     if (tunOn) {
       // flag(clashConfig.tun.enable) 运行时读不准，改用实测：
       // 不走代理直连国外 204，能通说明 TUN 确实在接管并出网。
-      const tunWorks = await probe('https://www.gstatic.com/generate_204', false)
+      const tunWorks = await probe(
+        'https://www.gstatic.com/generate_204',
+        false,
+      )
       if (tunWorks) {
         set('tun', 'ok', '已开启并生效（实测可出网）')
       } else if (!isTunModeAvailable) {
@@ -2062,9 +2234,11 @@ const HomePage = () => {
           const uid = (it as { uid?: string })?.uid
           if (uid) await deleteProfile(uid).catch(() => {})
         }
-        await patchProfilesConfig({ ...p, current: undefined, items: [] }).catch(
-          () => {},
-        )
+        await patchProfilesConfig({
+          ...p,
+          current: undefined,
+          items: [],
+        }).catch(() => {})
       } catch {
         // 忽略，下面照样重启重建
       }
@@ -2435,9 +2609,7 @@ const HomePage = () => {
                   />
                 )
               })}
-              <Typography
-                sx={{ fontSize: 11, color: 'rgba(226,236,250,.55)' }}
-              >
+              <Typography sx={{ fontSize: 11, color: 'rgba(226,236,250,.55)' }}>
                 自动选择可用线路，可点选切换
               </Typography>
             </Stack>
@@ -2540,7 +2712,11 @@ const HomePage = () => {
                     }}
                   />
                   <Typography
-                    sx={{ fontSize: 13, color: 'rgba(33,43,64,.86)', fontWeight: 600 }}
+                    sx={{
+                      fontSize: 13,
+                      color: 'rgba(33,43,64,.86)',
+                      fontWeight: 600,
+                    }}
                   >
                     {savedCode ? '提取码已绑定' : activeProfileName}
                   </Typography>
@@ -2876,8 +3052,8 @@ const HomePage = () => {
                       <Typography
                         sx={{ fontSize: 12, color: 'rgba(36,46,66,.62)' }}
                       >
-                        web 断网时自行导入/切换/编辑配置文件，也可导入其它
-                        Clash 订阅。
+                        web 断网时自行导入/切换/编辑配置文件，也可导入其它 Clash
+                        订阅。
                       </Typography>
                     </Box>
                     <Button
@@ -3196,8 +3372,9 @@ const HomePage = () => {
                                 whiteSpace: 'nowrap',
                               }}
                             >
-                              {TRAFFIC_RULE_TYPES.find((t) => t.name === rule.type)
-                                ?.label ?? rule.type}{' '}
+                              {TRAFFIC_RULE_TYPES.find(
+                                (t) => t.name === rule.type,
+                              )?.label ?? rule.type}{' '}
                               · 走 {rule.policy}
                             </Typography>
                           </Box>
@@ -3235,7 +3412,9 @@ const HomePage = () => {
               },
             }}
           >
-            <DialogTitle sx={{ fontWeight: 900, pb: 0.5 }}>系统自检</DialogTitle>
+            <DialogTitle sx={{ fontWeight: 900, pb: 0.5 }}>
+              系统自检
+            </DialogTitle>
             <DialogContent sx={{ pt: 1.5 }}>
               <Stack spacing={1}>
                 {selfCheckItems.length === 0 ? (
@@ -3324,7 +3503,9 @@ const HomePage = () => {
                                   fontWeight: 800,
                                 }}
                               >
-                                {item.fixing ? '修复中…' : item.fixLabel || '修复'}
+                                {item.fixing
+                                  ? '修复中…'
+                                  : item.fixLabel || '修复'}
                               </Button>
                             )}
                         </Stack>
@@ -3598,7 +3779,11 @@ const HomePage = () => {
                   web 断网或无法导入提取码订阅时，可在此手动导入其它 Clash
                   订阅链接、新建/编辑本地配置，并随时切换当前使用的配置文件。
                 </Typography>
-                <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                <Stack
+                  direction="row"
+                  spacing={1}
+                  sx={{ alignItems: 'center' }}
+                >
                   <TextField
                     fullWidth
                     size="small"
@@ -3636,9 +3821,7 @@ const HomePage = () => {
                   已有配置文件
                 </Typography>
                 {profileList.length === 0 ? (
-                  <Typography
-                    sx={{ fontSize: 12, color: 'rgba(36,46,66,.5)' }}
-                  >
+                  <Typography sx={{ fontSize: 12, color: 'rgba(36,46,66,.5)' }}>
                     暂无配置文件，请先导入或新建。
                   </Typography>
                 ) : (
@@ -3692,15 +3875,15 @@ const HomePage = () => {
                                   color: 'rgba(36,46,66,.55)',
                                 }}
                               >
-                                {item.type === 'remote' ? '远程订阅' : '本地配置'}
+                                {item.type === 'remote'
+                                  ? '远程订阅'
+                                  : '本地配置'}
                               </Typography>
                             </Box>
                             <Button
                               size="small"
                               disabled={manualBusy || isCurrent}
-                              onClick={() =>
-                                item.uid && manualSwitch(item.uid)
-                              }
+                              onClick={() => item.uid && manualSwitch(item.uid)}
                             >
                               切换
                             </Button>

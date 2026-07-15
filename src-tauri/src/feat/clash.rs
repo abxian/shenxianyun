@@ -80,7 +80,7 @@ fn after_change_clash_mode() {
 }
 
 /// Change Clash mode (rule/global/direct/script)
-pub async fn change_clash_mode(mode: String) {
+pub async fn change_clash_mode(mode: String) -> anyhow::Result<()> {
     let mut mapping = Mapping::new();
     mapping.insert(Value::from("mode"), Value::from(mode.as_str()));
     // Convert YAML mapping to JSON Value
@@ -88,27 +88,24 @@ pub async fn change_clash_mode(mode: String) {
         "mode": mode
     });
     logging!(debug, Type::Core, "change clash mode to {mode}");
-    match handle::Handle::mihomo().await.patch_base_config(&json_value).await {
-        Ok(_) => {
-            // 更新订阅
-            let clash = Config::clash().await;
-            clash.edit_draft(|d| d.patch_config(&mapping));
-            clash.apply();
+    handle::Handle::mihomo().await.patch_base_config(&json_value).await?;
 
-            // 分离数据获取和异步调用
-            let clash_data = clash.data_arc();
-            if clash_data.save_config().await.is_ok() {
-                handle::Handle::refresh_clash();
-                tray::Tray::global().update_menu_and_icon().await;
-            }
+    // 运行时修改成功后再持久化；任一步失败都返回给前端，不能显示虚假的成功提示。
+    let clash = Config::clash().await;
+    clash.edit_draft(|d| d.patch_config(&mapping));
+    clash.apply();
 
-            let is_auto_close_connection = Config::verge().await.data_arc().auto_close_connection.unwrap_or(false);
-            if is_auto_close_connection {
-                after_change_clash_mode();
-            }
-        }
-        Err(err) => logging!(error, Type::Core, "{err}"),
+    let clash_data = clash.data_arc();
+    clash_data.save_config().await?;
+    handle::Handle::refresh_clash();
+    tray::Tray::global().update_menu_and_icon().await;
+
+    let is_auto_close_connection = Config::verge().await.data_arc().auto_close_connection.unwrap_or(false);
+    if is_auto_close_connection {
+        after_change_clash_mode();
     }
+
+    Ok(())
 }
 
 /// Test delay to a URL through proxy.
