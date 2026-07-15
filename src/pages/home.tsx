@@ -81,6 +81,7 @@ import {
   initEndpointDiscovery,
   listApiBases,
   officialDirectRules,
+  pinnedCount,
   probeApiBase,
   rotateApiBase,
   setActiveApiBase,
@@ -1030,6 +1031,13 @@ const HomePage = () => {
     // 探测完成后再同步一次（发现/自动切换可能改了 active）
     setActiveLine(getApiBase())
   }, [])
+
+  // 线路条只在「神仙云1 和 神仙云2（写死的国内+国外主线路）都探测失败」时才显示，
+  // 让用户手动切到神仙云3/4;平时两条主线路任一可用就隐藏，界面保持极简。
+  const showLineBar = useMemo(() => {
+    const pinned = lines.slice(0, pinnedCount())
+    return pinned.length >= pinnedCount() && pinned.every((l) => l.ok === false)
+  }, [lines])
 
   const switchLine = useLockFn(async (base: string, index: number) => {
     setStatus(`正在测试神仙云${index + 1}...`)
@@ -2351,7 +2359,7 @@ const HomePage = () => {
             </Stack>
           </Stack>
 
-          {lines.length > 0 && (
+          {showLineBar && (
             <Stack
               direction="row"
               spacing={0.75}

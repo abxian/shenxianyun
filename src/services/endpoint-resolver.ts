@@ -8,14 +8,24 @@ import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
  * 发现失败 → 用本地缓存；再没有 → 用内置默认。任何一步都不阻塞启动。
  */
 
-// 内置兜底默认值（发现源全挂时最后的锚点）
-export const DEFAULT_API_BASE = 'https://sxnn.de'
-// 发现失败时的内置候选（按序探测），避免单个默认域名挂掉即全灭。
-export const BUILTIN_API_BASES = [
-  'https://sxnn.de',
-  'http://114.80.36.225:5010',
-  'https://sub.jc116.com',
+// 写死的两条主线路：神仙云1=国内直连域名, 神仙云2=国外(Cloudflare)域名。
+// 始终排在最前，保证任何情况下都有稳定的国内+国外入口；
+// endpoints.json 的 api_bases 里的其它地址去重后接在其后（神仙云3/4…）。
+export const PINNED_API_BASES = [
+  'https://api.sxnn.de:5443', // 神仙云1 国内直连
+  'https://sxnn.de', // 神仙云2 国外(CF)
 ]
+// 内置兜底默认值（发现源全挂时用第一条写死线路）
+export const DEFAULT_API_BASE = PINNED_API_BASES[0]
+
+// 完整线路列表 = 写死主线路(神仙云1/2) + 发现到的 api_bases(神仙云3/4…, 去重, 排后面)
+const allApiBases = (): string[] => {
+  const merged = [...PINNED_API_BASES]
+  for (const b of readCache()?.api_bases ?? []) {
+    if (b && !merged.includes(b)) merged.push(b)
+  }
+  return merged
+}
 
 // 发现锚点：第一个是 web 后台「保存并发布」自动上传的 endpoints.json（唯一真源，dufs），
 // 后两个是备份（GitHub 手动同步、app 动态接口）。
@@ -81,8 +91,7 @@ const readCache = (): Endpoints | null => {
 export const getApiBase = (): string => {
   const active = normalizeBase(localStorage.getItem(ACTIVE_BASE_KEY))
   if (active) return active
-  const cached = readCache()
-  return cached?.api_bases?.[0] || DEFAULT_API_BASE
+  return allApiBases()[0] || DEFAULT_API_BASE
 }
 
 export const getEndpoints = (): Endpoints | null => readCache()
@@ -149,10 +158,7 @@ const reachable = async (base: string, proxyUrl?: string): Promise<boolean> => {
 
 /** 逐个探测 api_bases，第一个通的设为 active。proxyUrl=内核混合端口（可选兜底）。 */
 export const pickApiBase = async (proxyUrl?: string): Promise<string> => {
-  const bases = readCache()?.api_bases?.length
-    ? (readCache()?.api_bases as string[])
-    : BUILTIN_API_BASES
-  for (const base of bases) {
+  for (const base of allApiBases()) {
     if (await reachable(base, proxyUrl)) {
       localStorage.setItem(ACTIVE_BASE_KEY, base)
       return base
@@ -161,11 +167,11 @@ export const pickApiBase = async (proxyUrl?: string): Promise<string> => {
   return getApiBase()
 }
 
-/** 当前全部候选线路（发现缓存优先，否则内置列表）。 */
-export const listApiBases = (): string[] => {
-  const cached = readCache()?.api_bases
-  return cached?.length ? cached : BUILTIN_API_BASES
-}
+/** 当前全部候选线路 = 写死主线路(神仙云1/2) + 发现的 api_bases(神仙云3/4…)。 */
+export const listApiBases = (): string[] => allApiBases()
+
+/** 写死的主线路条数（神仙云1/2），UI 用来判断"前两条是否都不通"。 */
+export const pinnedCount = (): number => PINNED_API_BASES.length
 
 /** 探测单条线路是否可用。proxyUrl=内核混合端口（可选兜底）。 */
 export const probeApiBase = async (
@@ -182,10 +188,7 @@ export const setActiveApiBase = (base: string): void => {
 /** 请求失败时调用：把当前 active 基址作废并顺延到下一个候选，返回新基址。 */
 export const rotateApiBase = async (proxyUrl?: string): Promise<string> => {
   const bad = getApiBase()
-  const bases = readCache()?.api_bases?.length
-    ? (readCache()?.api_bases as string[])
-    : BUILTIN_API_BASES
-  for (const base of bases.filter((b) => b !== bad)) {
+  for (const base of allApiBases().filter((b) => b !== bad)) {
     if (await reachable(base, proxyUrl)) {
       localStorage.setItem(ACTIVE_BASE_KEY, base)
       return base
