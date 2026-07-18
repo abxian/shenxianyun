@@ -143,11 +143,12 @@ const fieldSx = {
     color: 'rgba(33,43,64,.82)',
   },
   '& .MuiInputLabel-root.Mui-focused': {
-    color: '#1c8dff',
+    color: '#5f7bf0',
   },
   '& .MuiInputBase-root': {
     color: '#182033',
-    bgcolor: 'rgba(255,255,255,.82)',
+    bgcolor: 'rgba(255,255,255,.6)',
+    borderRadius: '12px',
   },
   '& .MuiInputBase-input': {
     color: '#182033',
@@ -159,26 +160,28 @@ const fieldSx = {
     borderColor: 'rgba(45,65,105,.18)',
   },
   '& .MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline': {
-    borderColor: 'rgba(28,141,255,.52)',
+    borderColor: 'rgba(127,151,244,.6)',
   },
   '& .MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline': {
-    borderColor: '#1c8dff',
+    borderColor: '#5f7bf0',
   },
   '& .MuiSelect-icon': {
     color: 'rgba(24,32,51,.72)',
   },
   '& .MuiSvgIcon-root': {
-    color: 'rgba(28,141,255,.86)',
+    color: 'rgba(95,123,240,.9)',
   },
 }
 
 const outlineButtonSx = {
-  color: '#176fd6',
-  borderColor: 'rgba(28,141,255,.44)',
-  bgcolor: 'rgba(28,141,255,.06)',
+  color: '#4356c4',
+  borderColor: 'rgba(255,255,255,.75)',
+  bgcolor: 'rgba(255,255,255,.45)',
+  backdropFilter: 'blur(8px)',
+  borderRadius: '12px',
   '&:hover': {
-    borderColor: '#1c8dff',
-    bgcolor: 'rgba(28,141,255,.12)',
+    borderColor: '#7f97f4',
+    bgcolor: 'rgba(255,255,255,.65)',
   },
   '&.Mui-disabled': {
     color: 'rgba(36,46,66,.38)',
@@ -1673,7 +1676,7 @@ const HomePage = () => {
     }
 
     setDelayTesting(true)
-    setStatus('正在测试节点延迟...')
+    setStatus('正在测试节点连通性...')
     try {
       await delayManager.checkListDelay(
         nodes.map((node) => node.name),
@@ -1683,7 +1686,7 @@ const HomePage = () => {
       )
       setDelaySortTick((tick) => tick + 1)
       await refreshProxy()
-      setStatus('延迟测试完成，低延迟节点已排在前面')
+      setStatus('连通性测试完成：节点名后显示数字(毫秒)即代表连接正常，已按速度排序')
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error))
     } finally {
@@ -2552,7 +2555,7 @@ const HomePage = () => {
           overflow: 'auto',
           position: 'relative',
           background:
-            'radial-gradient(1200px 520px at 50% -8%, rgba(28,141,255,.16), transparent 60%), linear-gradient(168deg, #0f2747 0%, #15315a 46%, #0e2444 100%)',
+            'radial-gradient(900px 420px at 18% 0%, rgba(255,255,255,.5), transparent 55%), radial-gradient(1100px 520px at 88% 100%, rgba(140,150,245,.45), transparent 60%), linear-gradient(135deg, #aebef2 0%, #c3c6f4 38%, #98aef0 72%, #8fa4ee 100%)',
         }}
       >
         <Box
@@ -2634,12 +2637,12 @@ const HomePage = () => {
                   fontWeight: 900,
                   letterSpacing: 0,
                   color: '#ffffff',
-                  textShadow: '0 2px 20px rgba(28,141,255,.5)',
+                  textShadow: '0 2px 18px rgba(90,110,220,.45)',
                 }}
               >
                 神仙云
               </Typography>
-              <Typography sx={{ color: 'rgba(226,236,250,.82)', fontSize: 12 }}>
+              <Typography sx={{ color: 'rgba(255,255,255,.92)', fontSize: 12, textShadow: '0 1px 8px rgba(90,110,220,.35)' }}>
                 提取码订阅 · 节点选择 · 一键连接
               </Typography>
             </Box>
@@ -2647,24 +2650,34 @@ const HomePage = () => {
               direction="row"
               spacing={1}
               useFlexGap
-              sx={{ flexWrap: 'wrap' }}
+              sx={{
+                flexWrap: 'wrap',
+                '& .MuiChip-root': {
+                  bgcolor: 'rgba(255,255,255,.34)',
+                  border: '1px solid rgba(255,255,255,.55)',
+                  color: '#2e3a66',
+                  fontWeight: 800,
+                  backdropFilter: 'blur(10px)',
+                  borderRadius: '999px',
+                  px: 0.5,
+                  '& .MuiChip-icon': { color: '#4a5fc9' },
+                },
+              }}
             >
               <Chip
                 size="small"
                 icon={<BoltRounded />}
-                color={running ? 'success' : 'default'}
+                sx={running ? { '&.MuiChip-root': { bgcolor: 'rgba(70,205,150,.32)', borderColor: 'rgba(70,205,150,.5)' } } : undefined}
                 label={running ? '在线' : '离线'}
               />
               <Chip
                 size="small"
                 icon={<LanguageRounded />}
-                label={mode === 'global' ? '全局' : '规则'}
+                label={mode === 'global' ? '全局模式' : '规则'}
               />
               <Chip
                 size="small"
                 icon={<LanRounded />}
-                color={systemProxyChip.color}
-                variant={systemProxyChip.variant}
                 label={systemProxyChip.label}
               />
             </Stack>
@@ -2673,13 +2686,13 @@ const HomePage = () => {
           <Paper
             elevation={0}
             sx={{
-              borderRadius: '22px',
-              p: 1.15,
-              border: '1px solid rgba(255,255,255,.22)',
-              bgcolor: 'rgba(255,255,255,.96)',
+              borderRadius: '26px',
+              p: 1.3,
+              border: '1px solid rgba(255,255,255,.6)',
+              bgcolor: 'rgba(255,255,255,.3)',
               boxShadow:
-                '0 28px 70px rgba(4,16,38,.5), 0 0 0 1px rgba(255,255,255,.4), inset 0 1px 0 rgba(255,255,255,.95)',
-              backdropFilter: 'blur(20px)',
+                '0 24px 60px rgba(90,110,220,.28), inset 0 1px 0 rgba(255,255,255,.75)',
+              backdropFilter: 'blur(22px)',
               overflow: 'hidden',
               position: 'relative',
               '&:before': {
@@ -2688,7 +2701,7 @@ const HomePage = () => {
                 inset: 0,
                 pointerEvents: 'none',
                 background:
-                  'linear-gradient(120deg, rgba(28,141,255,.09), transparent 44%, rgba(255,128,170,.08))',
+                  'linear-gradient(120deg, rgba(255,255,255,.22), transparent 46%, rgba(150,160,250,.14))',
                 opacity: 1,
               },
             }}
@@ -2715,11 +2728,12 @@ const HomePage = () => {
                     display: 'grid',
                     placeItems: 'center',
                     background: running
-                      ? 'radial-gradient(circle, rgba(41,190,160,.22), rgba(41,190,160,.08) 62%, transparent 63%)'
-                      : 'radial-gradient(circle, rgba(255,116,138,.22), rgba(255,116,138,.08) 62%, transparent 63%)',
+                      ? 'radial-gradient(circle, rgba(70,205,150,.3), rgba(70,205,150,.1) 62%, transparent 63%)'
+                      : 'radial-gradient(circle, rgba(255,255,255,.55), rgba(140,160,245,.18) 62%, transparent 63%)',
+                    border: '1px dashed rgba(255,255,255,.65)',
                     boxShadow: running
-                      ? '0 0 38px rgba(41,190,160,.16)'
-                      : '0 0 38px rgba(255,116,138,.16)',
+                      ? '0 0 42px rgba(70,205,150,.28)'
+                      : '0 0 42px rgba(130,150,245,.35)',
                   }}
                 >
                   <Button
@@ -2733,15 +2747,15 @@ const HomePage = () => {
                       fontWeight: 900,
                       color: 'white',
                       background: running
-                        ? 'linear-gradient(135deg, #28c99c, #2aa7ff)'
-                        : 'linear-gradient(135deg, #ff6f8f, #ff9b66)',
+                        ? 'linear-gradient(135deg, #35c58f, #3f9ff2)'
+                        : 'linear-gradient(145deg, #8ea6f6 0%, #5f7bf0 55%, #4f66e8 100%)',
                       boxShadow: running
-                        ? '0 18px 34px rgba(42,167,255,.24)'
-                        : '0 18px 34px rgba(255,111,143,.24)',
+                        ? '0 18px 36px rgba(63,159,242,.35)'
+                        : '0 18px 38px rgba(95,123,240,.45), inset 0 2px 6px rgba(255,255,255,.35)',
                       '&:hover': {
                         background: running
-                          ? 'linear-gradient(135deg, #24b88f, #2198ed)'
-                          : 'linear-gradient(135deg, #f26182, #f18e5c)',
+                          ? 'linear-gradient(135deg, #2eb582, #368fe0)'
+                          : 'linear-gradient(145deg, #80a0f5 0%, #536fee 55%, #4159e0 100%)',
                       },
                     }}
                   >
@@ -2763,17 +2777,26 @@ const HomePage = () => {
                     label={powerHint}
                     sx={{
                       fontWeight: 800,
-                      bgcolor: running ? undefined : 'rgba(24,32,51,.04)',
+                      ...(running
+                        ? {}
+                        : {
+                            bgcolor: 'rgba(255,255,255,.42)',
+                            border: '1px solid rgba(255,255,255,.65)',
+                            color: '#33406e',
+                          }),
                     }}
                   />
                   <Typography
                     sx={{
                       fontSize: 13,
-                      color: 'rgba(33,43,64,.86)',
-                      fontWeight: 600,
+                      color: '#33406e',
+                      fontWeight: 700,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 0.5,
                     }}
                   >
-                    {savedCode ? '提取码已绑定' : activeProfileName}
+                    {savedCode ? '🛡️ 提取码已绑定' : activeProfileName}
                   </Typography>
                   {expiresAt && (
                     <Chip
@@ -2790,11 +2813,12 @@ const HomePage = () => {
                 sx={{
                   flex: 1,
                   minWidth: 0,
-                  borderRadius: '16px',
-                  p: 1,
-                  border: '1px solid rgba(45,65,105,.12)',
-                  bgcolor: 'rgba(244,248,253,.95)',
-                  boxShadow: 'inset 0 1px 0 rgba(255,255,255,.9)',
+                  borderRadius: '20px',
+                  p: 1.1,
+                  border: '1px solid rgba(255,255,255,.55)',
+                  bgcolor: 'rgba(255,255,255,.32)',
+                  backdropFilter: 'blur(14px)',
+                  boxShadow: 'inset 0 1px 0 rgba(255,255,255,.7)',
                 }}
               >
                 <Stack
@@ -2822,10 +2846,11 @@ const HomePage = () => {
                         color: 'rgba(33,43,64,.9)',
                         '&.Mui-selected': {
                           color: '#fff',
-                          bgcolor: '#1c8dff',
+                          bgcolor: '#5f7bf0',
+                          boxShadow: '0 6px 16px rgba(95,123,240,.4)',
                         },
                         '&.Mui-selected:hover': {
-                          bgcolor: '#167ce3',
+                          bgcolor: '#4f66e8',
                         },
                       },
                     }}
@@ -2858,7 +2883,7 @@ const HomePage = () => {
                       onClick={testNodeDelay}
                       sx={{ minWidth: 104 }}
                     >
-                      {delayTesting ? '测试中' : '测延迟'}
+                      {delayTesting ? '测试中' : '测试连通性'}
                     </Button>
                   </Stack>
 
@@ -2880,10 +2905,11 @@ const HomePage = () => {
                       }}
                       sx={{
                         flex: '1 1 132px',
-                        bgcolor: '#1c8dff',
+                        background: 'linear-gradient(135deg, #7f97f4, #5f7bf0)',
                         color: '#fff',
                         fontWeight: 800,
-                        '&:hover': { bgcolor: '#167ce3' },
+                        boxShadow: '0 8px 20px rgba(95,123,240,.4)',
+                        '&:hover': { background: 'linear-gradient(135deg, #6f8af2, #4f66e8)' },
                       }}
                     >
                       {savedCode ? '切换提取码' : '导入订阅'}
@@ -3005,6 +3031,39 @@ const HomePage = () => {
                     >
                       {savedCode ? '续费' : '新购'}
                     </Button>
+                  </Stack>
+
+                  <Stack
+                    direction="row"
+                    spacing={0.8}
+                    sx={{
+                      alignItems: 'center',
+                      borderRadius: '12px',
+                      px: 1.2,
+                      py: 0.7,
+                      bgcolor: 'rgba(255,255,255,.4)',
+                      border: '1px solid rgba(255,255,255,.6)',
+                    }}
+                  >
+                    <Box
+                      sx={{
+                        width: 18,
+                        height: 18,
+                        borderRadius: '50%',
+                        bgcolor: '#5f7bf0',
+                        color: '#fff',
+                        fontSize: 12,
+                        fontWeight: 900,
+                        display: 'grid',
+                        placeItems: 'center',
+                        flexShrink: 0,
+                      }}
+                    >
+                      i
+                    </Box>
+                    <Typography sx={{ fontSize: 12.5, color: '#33406e', fontWeight: 600 }}>
+                      测试连通性后，节点名后显示数字(毫秒)即代表该节点连接正常，可放心使用。
+                    </Typography>
                   </Stack>
 
                   {status && (
