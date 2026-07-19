@@ -1916,9 +1916,56 @@ const HomePage = () => {
     refreshAll,
   ])
 
-  // 取出口 IP / 国家；viaProxy=true 反映节点出口，false 反映本地直连出口。
+  // 取出口 IP / 国家；viaProxy=true 反映节点出口（与系统代理同源，因为系统代理也指向
+  // 内核混合端口），false 反映本地直连出口。优先用 Cloudflare trace（纯文本、极稳、几乎
+  // 不被限流），再退回各 JSON 查询源，最大化"一定取到 IP"。
   const fetchEgress = useCallback(
     async (viaProxy: boolean, ipv6 = false) => {
+      const req = async (url: string, timeout = 8000) => {
+        const ctrl = new AbortController()
+        const t = setTimeout(() => ctrl.abort(), timeout)
+        try {
+          const res = await tauriFetch(url, {
+            method: 'GET',
+            signal: ctrl.signal,
+            ...(viaProxy ? { proxy: { all: proxyUrl } } : {}),
+          })
+          return res.ok ? res : null
+        } catch {
+          return null
+        } finally {
+          clearTimeout(t)
+        }
+      }
+
+      // 1) Cloudflare trace（文本 ip=.. loc=..），IPv4/IPv6 都可能返回，最稳
+      if (!ipv6) {
+        for (const url of [
+          'https://www.cloudflare.com/cdn-cgi/trace',
+          'https://cloudflare.com/cdn-cgi/trace',
+          'https://1.1.1.1/cdn-cgi/trace',
+        ]) {
+          const res = await req(url)
+          if (!res) continue
+          try {
+            const text = await res.text()
+            const map: Record<string, string> = {}
+            text.split('\n').forEach((line) => {
+              const i = line.indexOf('=')
+              if (i > 0) map[line.slice(0, i)] = line.slice(i + 1)
+            })
+            const ip = map.ip || ''
+            // 只取 IPv4（trace 有时给 v6，v6 场景另有分支）
+            if (ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip)) {
+              return { ip, cc: (map.loc || '').toUpperCase(), country: map.loc || '' }
+            }
+          } catch {
+            // 下一个
+          }
+        }
+      }
+
+      // 2) JSON 查询源
       const endpoints = ipv6
         ? [
             'https://api6.ipify.org?format=json',
@@ -1926,40 +1973,24 @@ const HomePage = () => {
             'https://v6.ident.me/.json',
           ]
         : [
-            // 多套出口 IP 查询源，任意一个成功即返回；顺序即优先级。
             'https://api.ip.sb/geoip',
             'https://ipwho.is/',
-            'https://ipapi.co/json',
-            'https://api.ipapi.is/',
-            'https://ip.api.skk.moe/cf-geoip',
             'https://get.geojs.io/v1/ip/geo.json',
+            'https://ipapi.co/json',
+            'https://api.ipify.org?format=json',
           ]
       for (const url of endpoints) {
+        const res = await req(url)
+        if (!res) continue
         try {
-          const ctrl = new AbortController()
-          const t = setTimeout(() => ctrl.abort(), 6000)
-          const res = await tauriFetch(url, {
-            method: 'GET',
-            signal: ctrl.signal,
-            ...(viaProxy ? { proxy: { all: proxyUrl } } : {}),
-          })
-          clearTimeout(t)
-          if (!res.ok) continue
           const d = (await res.json()) as Record<string, unknown>
-          // 不同服务字段名各异，做一层宽松提取（含 location 嵌套）。
           const loc = (d.location ?? {}) as Record<string, unknown>
           const ip = String(d.ip ?? d.IP ?? '')
           if (!ip) continue
           const cc = String(
-            d.country_code ??
-              d.country ??
-              loc.country_code ??
-              loc.country ??
-              '',
+            d.country_code ?? d.country ?? loc.country_code ?? loc.country ?? '',
           ).toUpperCase()
-          const country = String(
-            d.country_name ?? d.country ?? loc.country ?? '',
-          )
+          const country = String(d.country_name ?? d.country ?? loc.country ?? '')
           return { ip, cc, country }
         } catch {
           // 试下一个
@@ -2271,19 +2302,29 @@ const HomePage = () => {
       )
     }
 
-    // 国外站点：强制走核心混合端口，看真实出口 IP/国家
+    // 国外站点：走核心混合端口取真实出口 IP/国家。系统代理也指向该端口，
+    // 所以这里的出口 IP 与浏览器/系统代理看到的完全一致。
     const egress = await fetchEgress(true)
     if (!egress) {
-      const g = await probe('https://www.gstatic.com/generate_204', true)
-      if (g) {
-        set('external', 'warn', '外网通，但取不到出口信息（IP 查询站被限）')
-      } else {
+      // 取不到 IP 时再多试一次（换更稳的源/更长超时），避免误报
+      const retry = await fetchEgress(true)
+      const eg2 = retry
+      if (eg2) {
         set(
           'external',
-          'fail',
-          '经代理无法访问外网（核心 / 节点 / DNS 异常）',
-          fixNetwork,
-          '修复网络',
+          eg2.cc === 'CN' ? 'warn' : 'ok',
+          `出口 ${eg2.ip}${eg2.country ? ` (${eg2.country})` : ''}（与系统代理同源）`,
+        )
+      } else {
+        const g = await probe('https://www.gstatic.com/generate_204', true)
+        set(
+          'external',
+          g ? 'warn' : 'fail',
+          g
+            ? '外网可访问，但出口 IP 查询站均超时/被限，稍后重试可显示'
+            : '经代理无法访问外网（核心 / 节点 / DNS 异常）',
+          g ? undefined : fixNetwork,
+          g ? undefined : '修复网络',
         )
       }
     } else if (egress.cc === 'CN') {
@@ -2296,7 +2337,7 @@ const HomePage = () => {
       set(
         'external',
         'ok',
-        `出口 ${egress.ip}${egress.country ? ` (${egress.country})` : ''}`,
+        `出口 ${egress.ip}${egress.country ? ` (${egress.country})` : ''}（与系统代理同源）`,
       )
     }
 
@@ -2329,6 +2370,37 @@ const HomePage = () => {
       invalidateProxyState?.(),
     ])
     await runSelfCheck()
+  })
+
+  // 一键尝试修复：依次执行所有检测项各自的自动修复动作，然后重新自检。
+  // 比「彻底重置」温和得多——不删配置、不清数据，只修复能修的项。
+  const runSelfCheckFixAll = useLockFn(async () => {
+    const fixables = selfCheckItems.filter((it) => it.fix)
+    if (fixables.length === 0) {
+      setStatus('没有可自动修复的项')
+      return
+    }
+    setSelfChecking(true)
+    setStatus('正在尝试自动修复...')
+    for (const it of fixables) {
+      setSelfCheckItems((prev) =>
+        prev.map((x) =>
+          x.key === it.key ? { ...x, fixing: true, detail: '修复中…' } : x,
+        ),
+      )
+      try {
+        await it.fix?.()
+      } catch {
+        // 单项失败不影响其它项，最终重测会反映真实状态
+      }
+    }
+    await Promise.allSettled([
+      mutateSystemState?.(),
+      refreshClashConfig?.(),
+      invalidateProxyState?.(),
+    ])
+    await runSelfCheck()
+    setStatus('已尝试自动修复，请查看最新结果')
   })
 
   // 彻底重置：清空所有有问题的配置/订阅/本地数据，重启后等于全新安装。
@@ -3712,6 +3784,18 @@ const HomePage = () => {
                 sx={{ mr: 'auto', fontWeight: 800 }}
               >
                 彻底重置
+              </Button>
+              <Button
+                variant="contained"
+                color="success"
+                onClick={runSelfCheckFixAll}
+                disabled={
+                  selfChecking || !selfCheckItems.some((it) => it.fix)
+                }
+                startIcon={<BuildRounded />}
+                sx={{ fontWeight: 800 }}
+              >
+                尝试修复
               </Button>
               <Button
                 onClick={runSelfCheck}
