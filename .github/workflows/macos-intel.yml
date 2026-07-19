@@ -76,7 +76,22 @@ jobs:
       - name: Install dependencies and sidecars
         shell: bash
         run: |
+          set -euo pipefail
           pnpm install --frozen-lockfile
+
+          ALPHA_VERSION=$(curl --fail --silent --show-error --location \
+            --retry 8 --retry-all-errors --retry-delay 10 \
+            https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/version.txt)
+          ALPHA_ARCHIVE="mihomo-darwin-amd64-v1-go122-${ALPHA_VERSION}.gz"
+          ALPHA_SIDECAR="src-tauri/sidecar/verge-mihomo-alpha-${TARGET}"
+          mkdir -p src-tauri/sidecar
+          curl --fail --silent --show-error --location \
+            --retry 8 --retry-all-errors --retry-delay 10 \
+            "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/$ALPHA_ARCHIVE" \
+            -o "$RUNNER_TEMP/$ALPHA_ARCHIVE"
+          gzip -dc "$RUNNER_TEMP/$ALPHA_ARCHIVE" > "$ALPHA_SIDECAR"
+          chmod 755 "$ALPHA_SIDECAR"
+
           pnpm run prebuild "$TARGET"
           rustup target add "$TARGET" --toolchain 1.95.0
 
