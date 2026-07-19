@@ -7,6 +7,11 @@ on:
         description: 'Existing release tag to build, for example v2.5.28'
         required: true
         type: string
+      reuse_release_assets:
+        description: 'Republish existing Intel release assets without rebuilding'
+        required: false
+        default: false
+        type: boolean
 
 permissions: write-all
 
@@ -38,12 +43,14 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Install Rust Stable
+        if: ${{ !inputs.reuse_release_assets }}
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.95.0'
           targets: ${{ env.TARGET }}
 
       - name: Rust Cache
+        if: ${{ !inputs.reuse_release_assets }}
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: 'v1-rust'
@@ -54,17 +61,20 @@ jobs:
           cache-workspace-crates: true
 
       - name: Install pnpm
+        if: ${{ !inputs.reuse_release_assets }}
         uses: pnpm/action-setup@v6
         with:
           run_install: false
 
       - name: Install Node
+        if: ${{ !inputs.reuse_release_assets }}
         uses: actions/setup-node@v6
         with:
           node-version: '24.16.0'
           cache: 'pnpm'
 
       - name: Install Intel OpenSSL
+        if: ${{ !inputs.reuse_release_assets }}
         shell: bash
         run: |
           brew install openssl@3
@@ -74,6 +84,7 @@ jobs:
           echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "$GITHUB_ENV"
 
       - name: Install dependencies and sidecars
+        if: ${{ !inputs.reuse_release_assets }}
         shell: bash
         run: |
           set -euo pipefail
@@ -96,6 +107,7 @@ jobs:
           rustup target add "$TARGET" --toolchain 1.95.0
 
       - name: Build Intel bundles
+        if: ${{ !inputs.reuse_release_assets }}
         shell: bash
         env:
           NODE_OPTIONS: '--max_old_space_size=4096'
@@ -104,6 +116,7 @@ jobs:
         run: pnpm build --target "$TARGET"
 
       - name: Verify bundle outputs
+        if: ${{ !inputs.reuse_release_assets }}
         shell: bash
         run: |
           DMG=$(find "target/$TARGET/release/bundle/dmg" -name '*.dmg' -type f -print -quit)
@@ -118,7 +131,31 @@ jobs:
           echo "UPDATER=$UPDATER" >> "$GITHUB_ENV"
           echo "SIG=$SIG" >> "$GITHUB_ENV"
 
+      - name: Download existing Intel release assets
+        if: ${{ inputs.reuse_release_assets }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="$RUNNER_TEMP/intel-release"
+          mkdir -p "$BUNDLE_DIR"
+          gh release download "${{ inputs.tag }}" --dir "$BUNDLE_DIR" --clobber \
+            --pattern "Clash.Verge_${VERSION}_x64.dmg" \
+            --pattern 'Clash.Verge.app.tar.gz' \
+            --pattern 'Clash.Verge.app.tar.gz.sig'
+          DMG="$BUNDLE_DIR/Clash.Verge_${VERSION}_x64.dmg"
+          UPDATER="$BUNDLE_DIR/Clash.Verge.app.tar.gz"
+          SIG="$UPDATER.sig"
+          test "$(stat -f %z "$DMG")" -gt 10000000
+          test "$(stat -f %z "$UPDATER")" -gt 10000000
+          test -s "$SIG"
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+          echo "UPDATER=$UPDATER" >> "$GITHUB_ENV"
+          echo "SIG=$SIG" >> "$GITHUB_ENV"
+
       - name: Attest Intel bundles
+        if: ${{ !inputs.reuse_release_assets }}
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
@@ -127,6 +164,7 @@ jobs:
             ${{ env.SIG }}
 
       - name: Upload to existing GitHub release
+        if: ${{ !inputs.reuse_release_assets }}
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag }}
@@ -155,6 +193,12 @@ jobs:
             local target="$2"
             local expected actual
             expected=$(stat -f %z "$source")
+            actual=$(curl --fail --silent --show-error --max-time 30 -u "$AUTH" -I "$target" \
+              | awk 'BEGIN{IGNORECASE=1} /^content-length:/ {gsub("\\r", "", $2); print $2}' | tail -1 || true)
+            if [ "$actual" = "$expected" ]; then
+              echo "Dufs already has $(basename "$target") ($expected bytes), skipping"
+              return
+            fi
             curl --fail --silent --show-error --retry 4 --retry-all-errors \
               --connect-timeout 20 --max-time 1200 -u "$AUTH" -T "$source" "$target"
             actual=$(curl --fail --silent --show-error --max-time 30 -u "$AUTH" -I "$target" \
@@ -166,10 +210,12 @@ jobs:
           }
 
           INTEL_DMG="Clash.Verge_${VERSION}_x64.dmg"
+          UPDATER_NAME='Clash.Verge.app.tar.gz'
+          SIG_NAME="$UPDATER_NAME.sig"
           upload_verified "$DMG" "$BASE/$INTEL_DMG"
           upload_verified "$DMG" "$BASE/%E7%A5%9E%E4%BB%99%E4%BA%91-Intel.dmg"
-          upload_verified "$UPDATER" "$BASE/updater/$(basename "$UPDATER")"
-          upload_verified "$SIG" "$BASE/updater/$(basename "$SIG")"
+          upload_verified "$UPDATER" "$BASE/updater/$UPDATER_NAME"
+          upload_verified "$SIG" "$BASE/updater/$SIG_NAME"
 
           curl --fail --silent --show-error --max-time 30 -u "$AUTH" "$BASE/update.json" \
             > "$RUNNER_TEMP/update.json"
@@ -179,7 +225,7 @@ jobs:
           fi
 
           SIGNATURE=$(cat "$SIG")
-          UPDATER_URL="$PUBLIC/updater/$(basename "$UPDATER")"
+          UPDATER_URL="$PUBLIC/updater/$UPDATER_NAME"
           jq --arg url "$UPDATER_URL" --arg signature "$SIGNATURE" '
             .platforms.darwin = {url: $url, signature: $signature}
             | .platforms["darwin-intel"] = {url: $url, signature: $signature}
