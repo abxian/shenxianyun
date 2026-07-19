@@ -1,0 +1,186 @@
+name: macOS Intel Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build, for example v2.5.28'
+        required: true
+        type: string
+
+permissions: write-all
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+  HUSKY: 0
+  TARGET: x86_64-apple-darwin
+
+jobs:
+  build-macos-intel:
+    name: Build macOS Intel
+    runs-on: macos-15-intel
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify tag and version
+        shell: bash
+        run: |
+          VERSION=$(jq -r .version package.json)
+          if [ "${{ inputs.tag }}" != "v$VERSION" ]; then
+            echo "::error::Tag ${{ inputs.tag }} does not match package version v$VERSION"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.95.0'
+          targets: ${{ env.TARGET }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: 'v1-rust'
+          key: 'rust-shared-stable-macos-15-intel-${{ env.TARGET }}'
+          workspaces: |
+            . -> target
+          cache-all-crates: true
+          cache-workspace-crates: true
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - name: Install Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24.16.0'
+          cache: 'pnpm'
+
+      - name: Install Intel OpenSSL
+        shell: bash
+        run: |
+          brew install openssl@3
+          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+          echo "OPENSSL_INCLUDE_DIR=$(brew --prefix openssl@3)/include" >> "$GITHUB_ENV"
+          echo "OPENSSL_LIB_DIR=$(brew --prefix openssl@3)/lib" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      - name: Install dependencies and sidecars
+        shell: bash
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run prebuild "$TARGET"
+          rustup target add "$TARGET" --toolchain 1.95.0
+
+      - name: Build Intel bundles
+        shell: bash
+        env:
+          NODE_OPTIONS: '--max_old_space_size=4096'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        run: pnpm build --target "$TARGET"
+
+      - name: Verify bundle outputs
+        shell: bash
+        run: |
+          DMG=$(find "target/$TARGET/release/bundle/dmg" -name '*.dmg' -type f -print -quit)
+          UPDATER=$(find "target/$TARGET/release/bundle/macos" -name '*.app.tar.gz' -type f -print -quit)
+          SIG="$UPDATER.sig"
+          test -n "$DMG" && test -f "$DMG"
+          test -n "$UPDATER" && test -f "$UPDATER"
+          test -f "$SIG"
+          test "$(stat -f %z "$DMG")" -gt 10000000
+          test "$(stat -f %z "$UPDATER")" -gt 10000000
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+          echo "UPDATER=$UPDATER" >> "$GITHUB_ENV"
+          echo "SIG=$SIG" >> "$GITHUB_ENV"
+
+      - name: Attest Intel bundles
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            ${{ env.DMG }}
+            ${{ env.UPDATER }}
+            ${{ env.SIG }}
+
+      - name: Upload to existing GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.tag }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          overwrite_files: true
+          files: |
+            ${{ env.DMG }}
+            ${{ env.UPDATER }}
+            ${{ env.SIG }}
+
+      - name: Upload Intel bundles to Dufs
+        shell: bash
+        env:
+          DUFS_BASE: ${{ secrets.DUFS_BASE }}
+          DUFS_PUBLIC_BASE: https://sxy.sxnn.de:5443/sxy
+          DUFS_USER: ${{ secrets.DUFS_USER }}
+          DUFS_PASS: ${{ secrets.DUFS_PASS }}
+        run: |
+          set -euo pipefail
+          AUTH="$DUFS_USER:$DUFS_PASS"
+          BASE="${DUFS_BASE%/}"
+          PUBLIC="${DUFS_PUBLIC_BASE%/}"
+
+          upload_verified() {
+            local source="$1"
+            local target="$2"
+            local expected actual
+            expected=$(stat -f %z "$source")
+            curl --fail --silent --show-error --retry 4 --retry-all-errors \
+              --connect-timeout 20 --max-time 1200 -u "$AUTH" -T "$source" "$target"
+            actual=$(curl --fail --silent --show-error --max-time 30 -u "$AUTH" -I "$target" \
+              | awk 'BEGIN{IGNORECASE=1} /^content-length:/ {gsub("\\r", "", $2); print $2}' | tail -1)
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::Dufs size mismatch for $target: $actual/$expected"
+              exit 1
+            fi
+          }
+
+          INTEL_DMG="Clash.Verge_${VERSION}_x64.dmg"
+          upload_verified "$DMG" "$BASE/$INTEL_DMG"
+          upload_verified "$DMG" "$BASE/%E7%A5%9E%E4%BB%99%E4%BA%91-Intel.dmg"
+          upload_verified "$UPDATER" "$BASE/updater/$(basename "$UPDATER")"
+          upload_verified "$SIG" "$BASE/updater/$(basename "$SIG")"
+
+          curl --fail --silent --show-error --max-time 30 -u "$AUTH" "$BASE/update.json" \
+            > "$RUNNER_TEMP/update.json"
+          if [ "$(jq -r .version "$RUNNER_TEMP/update.json")" != "$VERSION" ]; then
+            echo "::error::Dufs update.json is not v$VERSION"
+            exit 1
+          fi
+
+          SIGNATURE=$(cat "$SIG")
+          UPDATER_URL="$PUBLIC/updater/$(basename "$UPDATER")"
+          jq --arg url "$UPDATER_URL" --arg signature "$SIGNATURE" '
+            .platforms.darwin = {url: $url, signature: $signature}
+            | .platforms["darwin-intel"] = {url: $url, signature: $signature}
+            | .platforms["darwin-x86_64"] = {url: $url, signature: $signature}
+          ' "$RUNNER_TEMP/update.json" > "$RUNNER_TEMP/update-intel.json"
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --max-time 60 \
+            -u "$AUTH" -X PUT -H 'Content-Type: application/json' \
+            --data-binary @"$RUNNER_TEMP/update-intel.json" "$BASE/update.json"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: shenxianyun-${{ env.VERSION }}-macos-intel
+          archive: false
+          path: |
+            ${{ env.DMG }}
+            ${{ env.UPDATER }}
+            ${{ env.SIG }}
+          if-no-files-found: error

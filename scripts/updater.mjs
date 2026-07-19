@@ -295,7 +295,7 @@ async function processRelease(github, options, tag, isAlpha) {
 
       // 自有 dufs 是第一更新通道：把更新包搬运到 dufs 并发布 update.json（仅稳定版）
       if (!isAlpha) {
-        await publishToDufs(updateData).catch((err) => {
+        await publishToDufs(updateData, release.assets).catch((err) => {
           console.error('[dufs] publish failed:', err.message)
           process.exitCode = 1
         })
@@ -328,7 +328,7 @@ async function getSignature(url) {
 // ===== 发布到自有 dufs：国内直连的第一更新通道，不依赖 GitHub / 第三方加速 =====
 // 把各平台更新包从 GitHub 搬运到 dufs /updater/ 下，并生成指向 dufs 的 update.json。
 // 需要仓库 secrets：DUFS_BASE（如 http://114.80.36.225:5011/sxy）、DUFS_USER、DUFS_PASS。
-async function publishToDufs(updateData) {
+async function publishToDufs(updateData, releaseAssets) {
   const base = (process.env.DUFS_BASE || '').replace(/\/+$/, '')
   if (!base) {
     console.log('[dufs] DUFS_BASE not set, skip dufs publish')
@@ -400,6 +400,79 @@ async function publishToDufs(updateData) {
     } catch (err) {
       console.log(`[dufs] ${filename} error: ${err.message}`)
       uploaded.set(value.url, false)
+    }
+  }
+
+  // 同步下载页使用的固定文件名，避免新版本只更新 /updater/ 而根目录仍是旧安装包。
+  const stableAliases = [
+    { suffix: 'x64-setup.exe', name: '神仙云.exe' },
+    { suffix: 'aarch64.dmg', name: '神仙云.dmg' },
+    { suffix: 'amd64.deb', name: '神仙云.deb' },
+    { suffix: 'x86_64.rpm', name: '神仙云.rpm' },
+  ]
+  for (const alias of stableAliases) {
+    const asset = releaseAssets.find(
+      ({ name }) => name.endsWith(alias.suffix) && !name.endsWith('.sig'),
+    )
+    if (!asset) {
+      console.log(`[dufs] root alias ${alias.name}: release asset not found`)
+      uploaded.set(`alias:${alias.name}`, false)
+      continue
+    }
+
+    const target = `${base}/${encodeURIComponent(alias.name)}`
+    try {
+      let buf = null
+      for (let attempt = 1; attempt <= 4 && !buf; attempt++) {
+        try {
+          const res = await fetch(asset.browser_download_url)
+          if (!res.ok) {
+            console.log(
+              `[dufs] ${alias.name} HTTP ${res.status} (try ${attempt})`,
+            )
+            continue
+          }
+          buf = Buffer.from(await res.arrayBuffer())
+        } catch (e) {
+          console.log(
+            `[dufs] ${alias.name} fetch err (try ${attempt}): ${e.message}`,
+          )
+          await new Promise((r) => setTimeout(r, 3000 * attempt))
+        }
+      }
+      if (!buf) {
+        uploaded.set(`alias:${alias.name}`, false)
+        continue
+      }
+
+      let putOk = false
+      for (let attempt = 1; attempt <= 4 && !putOk; attempt++) {
+        try {
+          const put = await fetch(target, {
+            method: 'PUT',
+            headers: { Authorization: auth },
+            body: buf,
+          })
+          const head = await fetch(target, {
+            method: 'HEAD',
+            headers: { Authorization: auth },
+          })
+          const uploadedSize = Number(head.headers.get('content-length'))
+          putOk = put.ok && head.ok && uploadedSize === buf.length
+          console.log(
+            `[dufs] root alias ${alias.name} -> HTTP ${put.status}, ${uploadedSize}/${buf.length} bytes (try ${attempt})`,
+          )
+        } catch (e) {
+          console.log(
+            `[dufs] ${alias.name} upload err (try ${attempt}): ${e.message}`,
+          )
+        }
+        if (!putOk) await new Promise((r) => setTimeout(r, 3000 * attempt))
+      }
+      uploaded.set(`alias:${alias.name}`, putOk)
+    } catch (err) {
+      console.log(`[dufs] ${alias.name} error: ${err.message}`)
+      uploaded.set(`alias:${alias.name}`, false)
     }
   }
 
