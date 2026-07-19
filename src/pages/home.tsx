@@ -189,6 +189,17 @@ const outlineButtonSx = {
   },
 }
 
+// 所有弹窗/选项页共用的玻璃拟态渐变面板，风格与主界面一致
+const glassDialogPaperSx = {
+  borderRadius: '22px',
+  border: '1px solid rgba(255,255,255,.6)',
+  background:
+    'linear-gradient(160deg, rgba(255,255,255,.9) 0%, rgba(233,236,252,.86) 52%, rgba(214,222,250,.84) 100%)',
+  backdropFilter: 'blur(26px)',
+  boxShadow:
+    '0 26px 64px rgba(90,110,220,.3), inset 0 1px 0 rgba(255,255,255,.85)',
+}
+
 const getClientId = () => {
   const saved = localStorage.getItem(CLIENT_ID_STORAGE_KEY)
   if (saved) return saved
@@ -2815,10 +2826,12 @@ const HomePage = () => {
                   minWidth: 0,
                   borderRadius: '20px',
                   p: 1.1,
-                  border: '1px solid rgba(255,255,255,.55)',
-                  bgcolor: 'rgba(255,255,255,.32)',
-                  backdropFilter: 'blur(14px)',
-                  boxShadow: 'inset 0 1px 0 rgba(255,255,255,.7)',
+                  border: '1px solid rgba(255,255,255,.6)',
+                  background:
+                    'linear-gradient(150deg, rgba(255,255,255,.45) 0%, rgba(226,231,252,.3) 60%, rgba(210,219,250,.26) 100%)',
+                  backdropFilter: 'blur(20px)',
+                  boxShadow:
+                    'inset 0 1px 0 rgba(255,255,255,.8), 0 8px 22px rgba(90,110,220,.12)',
                 }}
               >
                 <Stack
@@ -2868,6 +2881,23 @@ const HomePage = () => {
                         value={selectedNode}
                         onChange={(event) => changeNode(event.target.value)}
                         disabled={!nodeGroup || nodes.length === 0}
+                        MenuProps={{
+                          slotProps: {
+                            paper: {
+                              sx: {
+                                borderRadius: '14px',
+                                border: '1px solid rgba(255,255,255,.6)',
+                                background:
+                                  'linear-gradient(160deg, rgba(255,255,255,.92), rgba(233,236,252,.88))',
+                                backdropFilter: 'blur(22px)',
+                                boxShadow: '0 18px 44px rgba(90,110,220,.24)',
+                                '& .MuiMenuItem-root.Mui-selected': {
+                                  bgcolor: 'rgba(95,123,240,.16)',
+                                },
+                              },
+                            },
+                          },
+                        }}
                       >
                         {nodes.map((node) => (
                           <MenuItem key={node.name} value={node.name}>
@@ -3091,12 +3121,7 @@ const HomePage = () => {
             maxWidth="xs"
             slotProps={{
               paper: {
-                sx: {
-                  borderRadius: '20px',
-                  border: '1px solid rgba(70,100,145,.16)',
-                  background:
-                    'linear-gradient(145deg, rgba(255,255,255,.98), rgba(244,249,255,.96))',
-                },
+                sx: glassDialogPaperSx,
               },
             }}
           >
@@ -3137,7 +3162,7 @@ const HomePage = () => {
                         runSelfCheck()
                       }}
                       sx={{
-                        bgcolor: '#1c8dff',
+                        background: 'linear-gradient(135deg, #5f7bf0, #4159e0)',
                         fontWeight: 800,
                         '&:hover': { bgcolor: '#167ce3' },
                       }}
@@ -3236,7 +3261,7 @@ const HomePage = () => {
                       disabled={busy}
                       onClick={() => setProfileManagerOpen(true)}
                       sx={{
-                        bgcolor: '#1c8dff',
+                        background: 'linear-gradient(135deg, #5f7bf0, #4159e0)',
                         fontWeight: 800,
                         '&:hover': { bgcolor: '#167ce3' },
                       }}
@@ -3286,10 +3311,10 @@ const HomePage = () => {
                           borderColor: 'rgba(45,65,105,.16)',
                           '&.Mui-selected': {
                             color: '#fff',
-                            bgcolor: '#1c8dff',
+                            background: 'linear-gradient(135deg, #5f7bf0, #4159e0)',
                           },
                           '&.Mui-selected:hover': {
-                            bgcolor: '#167ce3',
+                            background: 'linear-gradient(135deg, #536fee, #3a50d8)',
                           },
                         },
                       }}
@@ -3417,12 +3442,7 @@ const HomePage = () => {
             maxWidth="sm"
             slotProps={{
               paper: {
-                sx: {
-                  borderRadius: '20px',
-                  border: '1px solid rgba(70,100,145,.16)',
-                  background:
-                    'linear-gradient(145deg, rgba(255,255,255,.98), rgba(244,249,255,.96))',
-                },
+                sx: glassDialogPaperSx,
               },
             }}
           >
@@ -3502,7 +3522,7 @@ const HomePage = () => {
                     onClick={addTrafficRule}
                     sx={{
                       minWidth: 96,
-                      bgcolor: '#1c8dff',
+                      background: 'linear-gradient(135deg, #5f7bf0, #4159e0)',
                       fontWeight: 800,
                       '&:hover': { bgcolor: '#167ce3' },
                     }}
@@ -3577,12 +3597,7 @@ const HomePage = () => {
             maxWidth="xs"
             slotProps={{
               paper: {
-                sx: {
-                  borderRadius: '20px',
-                  border: '1px solid rgba(70,100,145,.16)',
-                  background:
-                    'linear-gradient(145deg, rgba(255,255,255,.98), rgba(244,249,255,.96))',
-                },
+                sx: glassDialogPaperSx,
               },
             }}
           >
@@ -3716,8 +3731,8 @@ const HomePage = () => {
             slotProps={{
               paper: {
                 sx: {
-                  borderRadius: '20px',
-                  border: '1px solid rgba(229,72,77,.25)',
+                  ...glassDialogPaperSx,
+                  border: '1px solid rgba(229,72,77,.35)',
                 },
               },
             }}
@@ -3766,12 +3781,7 @@ const HomePage = () => {
             maxWidth="xs"
             slotProps={{
               paper: {
-                sx: {
-                  borderRadius: '18px',
-                  border: '1px solid rgba(70,100,145,.16)',
-                  background:
-                    'linear-gradient(145deg, rgba(255,255,255,.98), rgba(244,249,255,.96))',
-                },
+                sx: glassDialogPaperSx,
               },
             }}
           >
@@ -3834,7 +3844,7 @@ const HomePage = () => {
                 }}
                 sx={{
                   minWidth: 112,
-                  bgcolor: '#1c8dff',
+                  background: 'linear-gradient(135deg, #5f7bf0, #4159e0)',
                   fontWeight: 800,
                   '&:hover': { bgcolor: '#167ce3' },
                 }}
@@ -3856,12 +3866,7 @@ const HomePage = () => {
             maxWidth="xs"
             slotProps={{
               paper: {
-                sx: {
-                  borderRadius: '18px',
-                  border: '1px solid rgba(70,100,145,.16)',
-                  background:
-                    'linear-gradient(145deg, rgba(255,255,255,.98), rgba(244,249,255,.96))',
-                },
+                sx: glassDialogPaperSx,
               },
             }}
           >
@@ -4083,7 +4088,7 @@ const HomePage = () => {
                     onClick={importByCode}
                     sx={{
                       minWidth: 104,
-                      bgcolor: '#1c8dff',
+                      background: 'linear-gradient(135deg, #5f7bf0, #4159e0)',
                       fontWeight: 800,
                       '&:hover': { bgcolor: '#167ce3' },
                     }}
@@ -4136,6 +4141,7 @@ const HomePage = () => {
             onClose={() => setProfileManagerOpen(false)}
             fullWidth
             maxWidth="sm"
+            slotProps={{ paper: { sx: glassDialogPaperSx } }}
           >
             <DialogTitle sx={{ fontWeight: 900, pb: 0.5 }}>
               手动配置管理
@@ -4166,7 +4172,7 @@ const HomePage = () => {
                     onClick={manualImportByUrl}
                     sx={{
                       minWidth: 84,
-                      bgcolor: '#1c8dff',
+                      background: 'linear-gradient(135deg, #5f7bf0, #4159e0)',
                       fontWeight: 800,
                       '&:hover': { bgcolor: '#167ce3' },
                     }}
@@ -4290,6 +4296,7 @@ const HomePage = () => {
             onClose={() => setExpiredDialogOpen(false)}
             fullWidth
             maxWidth="xs"
+            slotProps={{ paper: { sx: glassDialogPaperSx } }}
           >
             <DialogTitle sx={{ fontWeight: 900, pb: 0.5 }}>
               提取码已到期
@@ -4311,7 +4318,7 @@ const HomePage = () => {
                   ).catch(() => undefined)
                 }}
                 sx={{
-                  bgcolor: '#1c8dff',
+                  background: 'linear-gradient(135deg, #5f7bf0, #4159e0)',
                   fontWeight: 800,
                   '&:hover': { bgcolor: '#167ce3' },
                 }}
