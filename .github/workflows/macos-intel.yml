@@ -12,6 +12,11 @@ on:
         required: false
         default: false
         type: boolean
+      publish_dufs:
+        description: 'Upload bundles and update metadata on Dufs'
+        required: false
+        default: true
+        type: boolean
 
 permissions: write-all
 
@@ -176,6 +181,7 @@ jobs:
             ${{ env.SIG }}
 
       - name: Upload Intel bundles to Dufs
+        if: ${{ inputs.publish_dufs }}
         shell: bash
         env:
           DUFS_BASE: ${{ secrets.DUFS_BASE }}
@@ -239,7 +245,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: shenxianyun-${{ env.VERSION }}-macos-intel
-          archive: false
           path: |
             ${{ env.DMG }}
             ${{ env.UPDATER }}
