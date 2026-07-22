@@ -10,13 +10,18 @@ import {
   KeyRounded,
   LanRounded,
   LanguageRounded,
+  NetworkCheckRounded,
+  OpenInBrowserRounded,
   PowerSettingsNewRounded,
   RefreshRounded,
   RestartAltRounded,
+  RouterRounded,
   RuleRounded,
+  SecurityRounded,
   SettingsRounded,
   ShoppingCartRounded,
   SpeedRounded,
+  SwapVertRounded,
 } from '@mui/icons-material'
 import {
   Alert,
@@ -49,8 +54,13 @@ import yaml from 'js-yaml'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getVersion } from 'tauri-plugin-mihomo-api'
 
-import { BasePage } from '@/components/base'
+import { BasePage, type DialogRef } from '@/components/base'
+import { WebsiteTestViewer } from '@/components/home/website-test-viewer'
 import { EditorViewer } from '@/components/profile/editor-viewer'
+import { ClashPortViewer } from '@/components/setting/mods/clash-port-viewer'
+import { ControllerViewer } from '@/components/setting/mods/controller-viewer'
+import { TunnelsViewer } from '@/components/setting/mods/tunnels-viewer'
+import { WebUIViewer } from '@/components/setting/mods/web-ui-viewer'
 import { useClash } from '@/hooks/use-clash'
 import { useConnectionData } from '@/hooks/use-connection-data'
 import { useProfiles } from '@/hooks/use-profiles'
@@ -135,8 +145,8 @@ const buildExpiredProfileYaml = () =>
     // 占位期间仍能探测到续费并自动恢复；其余流量全部走不可达的占位节点（无法上网）。
     rules: [...officialDirectRules(), 'MATCH,节点选择'],
   })
-const DESKTOP_VERSION = '2.5.28'
-const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.28'
+const DESKTOP_VERSION = '2.5.29-rc.1'
+const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.29-rc.1'
 const DESKTOP_PLATFORM = getSystem()
 const fieldSx = {
   '& .MuiInputLabel-root': {
@@ -578,6 +588,11 @@ const HomePage = () => {
     useState<CodeImportPhase>('input')
   const [codeImportMessage, setCodeImportMessage] = useState('')
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const portViewerRef = useRef<DialogRef>(null)
+  const controllerViewerRef = useRef<DialogRef>(null)
+  const webUIViewerRef = useRef<DialogRef>(null)
+  const websiteTestViewerRef = useRef<DialogRef>(null)
+  const tunnelsViewerRef = useRef<DialogRef>(null)
   const [serverCheckStatus, setServerCheckStatus] =
     useState<ServerCheckStatus>('idle')
   const [trafficRuleOpen, setTrafficRuleOpen] = useState(false)
@@ -708,6 +723,7 @@ const HomePage = () => {
   )
   const codeExpired = Boolean(expiresAt && nowMs > parseExpireTime(expiresAt))
   const allowLanOn = clash?.['allow-lan'] ?? false
+  const externalControllerOn = verge?.enable_external_controller ?? false
   const dnsOverwriteOn = verge?.enable_dns_settings ?? false
   const proxyGuardOn = verge?.enable_proxy_guard ?? true
   const powerHint = running ? '已启动，点击停止' : '还没有启动，点击启动'
@@ -3186,6 +3202,11 @@ const HomePage = () => {
               </Box>
             </Stack>
           </Paper>
+          <ClashPortViewer ref={portViewerRef} />
+          <ControllerViewer ref={controllerViewerRef} />
+          <WebUIViewer ref={webUIViewerRef} />
+          <WebsiteTestViewer ref={websiteTestViewerRef} />
+          <TunnelsViewer ref={tunnelsViewerRef} />
           <Dialog
             open={advancedOpen}
             onClose={() => setAdvancedOpen(false)}
@@ -3440,6 +3461,103 @@ const HomePage = () => {
                     </Button>
                   </Stack>
                 </Paper>
+
+                {[
+                  {
+                    icon: <RouterRounded sx={{ color: '#1c8dff' }} />,
+                    title: '代理端口',
+                    desc: `设置监听端口并查看当前端口。${lanPortHint}`,
+                    action: '设置端口',
+                    onClick: () => portViewerRef.current?.open(),
+                    status: '',
+                  },
+                  {
+                    icon: <SecurityRounded sx={{ color: '#7c5cff' }} />,
+                    title: '允许外部控制',
+                    desc: '允许局域网设备或 Web 面板连接 Mihomo 控制接口，可设置地址和访问密钥。',
+                    action: '配置',
+                    onClick: () => controllerViewerRef.current?.open(),
+                    status: externalControllerOn ? '已允许' : '未允许',
+                  },
+                  {
+                    icon: <OpenInBrowserRounded sx={{ color: '#18a679' }} />,
+                    title: 'Web 管理页面',
+                    desc: '打开或管理 Mihomo Web 控制页面，自动填入本机控制地址和密钥。',
+                    action: '打开',
+                    onClick: () => webUIViewerRef.current?.open(),
+                    status: '',
+                  },
+                  {
+                    icon: <NetworkCheckRounded sx={{ color: '#e88524' }} />,
+                    title: '网站测试',
+                    desc: '设置常用测试网址，检查当前代理能否访问并查看连接耗时。',
+                    action: '管理',
+                    onClick: () => websiteTestViewerRef.current?.open(),
+                    status: '',
+                  },
+                  {
+                    icon: <SwapVertRounded sx={{ color: '#d74c87' }} />,
+                    title: '流量隧道',
+                    desc: '把本地 TCP/UDP 端口经指定代理组或节点转发到目标地址。',
+                    action: '管理',
+                    onClick: () => tunnelsViewerRef.current?.open(),
+                    status: clash?.tunnels?.length
+                      ? `${clash.tunnels.length} 条`
+                      : '未配置',
+                  },
+                ].map((item) => (
+                  <Paper
+                    key={item.title}
+                    elevation={0}
+                    sx={{
+                      p: 1.25,
+                      borderRadius: '14px',
+                      border: '1px solid rgba(45,65,105,.12)',
+                      bgcolor: 'rgba(255,255,255,.72)',
+                    }}
+                  >
+                    <Stack
+                      direction="row"
+                      spacing={1.1}
+                      sx={{ alignItems: 'center' }}
+                    >
+                      {item.icon}
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        <Stack
+                          direction="row"
+                          spacing={0.8}
+                          sx={{ alignItems: 'center' }}
+                        >
+                          <Typography sx={{ fontWeight: 850 }}>
+                            {item.title}
+                          </Typography>
+                          {item.status && (
+                            <Chip
+                              size="small"
+                              label={item.status}
+                              color={
+                                item.status === '已允许' ? 'success' : 'default'
+                              }
+                              sx={{ height: 20, fontSize: 11, fontWeight: 800 }}
+                            />
+                          )}
+                        </Stack>
+                        <Typography
+                          sx={{ fontSize: 12, color: 'rgba(36,46,66,.62)' }}
+                        >
+                          {item.desc}
+                        </Typography>
+                      </Box>
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        onClick={item.onClick}
+                      >
+                        {item.action}
+                      </Button>
+                    </Stack>
+                  </Paper>
+                ))}
 
                 {[
                   {
