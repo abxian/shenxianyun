@@ -81,6 +81,13 @@ Refer to [Doc FAQ Page](https://clash-verge-rev.github.io/faq/windows.html)
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for more details.
 
+### Build and verification policy
+
+- Full compilation and packaging must run in GitHub Actions. Local machines are only used for type checks, lint, unit tests, `git diff --check`, and optional development preview.
+- For changes that are not ready to publish, push an isolated branch and manually run `Frontend Check` and `Clippy Lint` against that branch. Do not change the version, create a tag/Release, or update Dufs/updater metadata merely to validate a build.
+- A workflow artifact is a temporary build result, not a published client. Publishing remains a separate, explicitly authorized step.
+- The release workflow is tag-only. Do not create a `v*` tag unless a new version has been approved.
+
 To run the development server, execute the following commands after all prerequisites for **Tauri** are installed:
 
 ```shell
