@@ -202,8 +202,7 @@ async function processRelease(github, options, tag, isAlpha) {
 
     Object.entries(updateDataNew.platforms).forEach(([key, value]) => {
       if (value.url) {
-        updateDataNew.platforms[key].url =
-          'https://gh-proxy.org/' + value.url
+        updateDataNew.platforms[key].url = 'https://gh-proxy.org/' + value.url
       } else {
         console.log(`[Error]: updateDataNew.platforms.${key} is null`)
       }
@@ -356,7 +355,8 @@ async function publishToDufs(updateData, releaseAssets) {
     const filename = decodeURIComponent(value.url.split('/').pop())
     const target = `${base}/updater/${encodeURIComponent(filename)}`
     if (uploaded.has(value.url)) {
-      if (uploaded.get(value.url)) value.url = `${publicBase}/updater/${encodeURIComponent(filename)}`
+      if (uploaded.get(value.url))
+        value.url = `${publicBase}/updater/${encodeURIComponent(filename)}`
       continue
     }
     try {
@@ -365,14 +365,24 @@ async function publishToDufs(updateData, releaseAssets) {
       for (let attempt = 1; attempt <= 4 && !buf; attempt++) {
         try {
           const res = await fetch(value.url)
-          if (!res.ok) { console.log(`[dufs] ${filename} HTTP ${res.status} (try ${attempt})`); continue }
+          if (!res.ok) {
+            console.log(
+              `[dufs] ${filename} HTTP ${res.status} (try ${attempt})`,
+            )
+            continue
+          }
           buf = Buffer.from(await res.arrayBuffer())
         } catch (e) {
-          console.log(`[dufs] ${filename} fetch err (try ${attempt}): ${e.message}`)
+          console.log(
+            `[dufs] ${filename} fetch err (try ${attempt}): ${e.message}`,
+          )
           await new Promise((r) => setTimeout(r, 3000 * attempt))
         }
       }
-      if (!buf) { uploaded.set(value.url, false); continue }
+      if (!buf) {
+        uploaded.set(value.url, false)
+        continue
+      }
       let putOk = false
       for (let attempt = 1; attempt <= 4 && !putOk; attempt++) {
         try {
@@ -391,12 +401,15 @@ async function publishToDufs(updateData, releaseAssets) {
             `[dufs] ${key}: ${filename} -> HTTP ${put.status}, ${uploadedSize}/${buf.length} bytes (try ${attempt})`,
           )
         } catch (e) {
-          console.log(`[dufs] ${filename} upload err (try ${attempt}): ${e.message}`)
+          console.log(
+            `[dufs] ${filename} upload err (try ${attempt}): ${e.message}`,
+          )
         }
         if (!putOk) await new Promise((r) => setTimeout(r, 3000 * attempt))
       }
       uploaded.set(value.url, putOk)
-      if (putOk) value.url = `${publicBase}/updater/${encodeURIComponent(filename)}`
+      if (putOk)
+        value.url = `${publicBase}/updater/${encodeURIComponent(filename)}`
     } catch (err) {
       console.log(`[dufs] ${filename} error: ${err.message}`)
       uploaded.set(value.url, false)
