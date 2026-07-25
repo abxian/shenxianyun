@@ -4,11 +4,13 @@ use smartstring::alias::String;
 use tauri::Url;
 
 use crate::{
+    cmd::managed::{self, ManagedImportRequest},
     config::{Config, PrfItem, profiles},
     core::{CoreManager, handle},
     utils::help,
 };
 use clash_verge_logging::{Type, logging, logging_error};
+use tauri::Emitter as _;
 
 pub(super) async fn resolve_scheme(param: &str) -> Result<()> {
     let param_str = if param.starts_with("[") && param.len() > 4 {
@@ -25,6 +27,13 @@ pub(super) async fn resolve_scheme(param: &str) -> Result<()> {
     let link_parsed = Url::parse(param_str)
         .map_err(|e| anyhow::anyhow!("failed to parse deep link: {e:?}, param: {masked_deep_link}"))?;
 
+    if let Some(request) = extract_managed_import_request(&link_parsed) {
+        managed::queue_managed_import(request);
+        let _ = handle::Handle::app_handle().emit("shenxianyun://managed-import", ());
+        logging!(info, Type::Config, "queued protected subscription import request");
+        return Ok(());
+    }
+
     let Some((url, name)) = extract_subscription_info(&link_parsed) else {
         logging!(
             warn,
@@ -36,6 +45,46 @@ pub(super) async fn resolve_scheme(param: &str) -> Result<()> {
 
     import_subscription(&url, name.as_ref()).await;
     Ok(())
+}
+
+fn extract_managed_import_request(link_parsed: &Url) -> Option<ManagedImportRequest> {
+    if link_parsed.scheme() != "shenxianyun" || link_parsed.host_str() != Some("install-config") {
+        return None;
+    }
+
+    let mut ticket = None;
+    let mut api_base = None;
+    let mut name = None;
+    for (key, value) in link_parsed.query_pairs() {
+        match key.as_ref() {
+            "ticket" => ticket = Some(value.into_owned()),
+            "api" => api_base = sanitize_api_base(value.as_ref()),
+            "name" => name = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+
+    let ticket = ticket?.trim().to_string();
+    if ticket.is_empty() {
+        return None;
+    }
+    Some(ManagedImportRequest {
+        ticket,
+        api_base: api_base?,
+        name,
+    })
+}
+
+fn sanitize_api_base(value: &str) -> Option<std::string::String> {
+    let mut parsed = Url::parse(value).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return None;
+    }
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    let path = parsed.path().trim_end_matches('/').to_string();
+    parsed.set_path(&path);
+    Some(parsed.to_string().trim_end_matches('/').to_string())
 }
 
 fn extract_subscription_info(link_parsed: &Url) -> Option<(std::string::String, Option<String>)> {
@@ -151,5 +200,47 @@ async fn refresh_core_config() {
             logging!(error, Type::Config, "Apply config error: {}", err);
             handle::Handle::notice_message("update_failed", format!("{err}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_protected_import_without_subscription_url() {
+        let link = Url::parse(
+            "shenxianyun://install-config?ticket=one-time-secret&api=https%3A%2F%2Fapi.example.test%3A5443&name=demo",
+        )
+        .unwrap();
+        let request = extract_managed_import_request(&link).unwrap();
+        assert_eq!(request.ticket, "one-time-secret");
+        assert_eq!(request.api_base, "https://api.example.test:5443");
+        assert_eq!(request.name.as_deref(), Some("demo"));
+    }
+
+    #[test]
+    fn rejects_protected_import_without_ticket_or_http_api() {
+        let missing_ticket =
+            Url::parse("shenxianyun://install-config?api=https%3A%2F%2Fapi.example.test").unwrap();
+        assert!(extract_managed_import_request(&missing_ticket).is_none());
+
+        let unsafe_api = Url::parse(
+            "shenxianyun://install-config?ticket=secret&api=file%3A%2F%2F%2Ftmp%2Fconfig",
+        )
+        .unwrap();
+        assert!(extract_managed_import_request(&unsafe_api).is_none());
+    }
+
+    #[test]
+    fn keeps_legacy_url_import_compatible() {
+        let link = Url::parse(
+            "shenxianyun://install-config?url=https%3A%2F%2Fexample.test%2Fsub%2Fcode&name=legacy",
+        )
+        .unwrap();
+        assert!(extract_managed_import_request(&link).is_none());
+        let (url, name) = extract_subscription_info(&link).unwrap();
+        assert_eq!(url, "https://example.test/sub/code");
+        assert_eq!(name.as_deref(), Some("legacy"));
     }
 }

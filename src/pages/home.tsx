@@ -47,6 +47,7 @@ import {
   Typography,
 } from '@mui/material'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { useLockFn } from 'ahooks'
@@ -102,6 +103,16 @@ import {
   probeApiBase,
   rotateApiBase,
 } from '@/services/endpoint-resolver'
+import {
+  clearManagedAuth,
+  extractTicketFromLaunchUrl,
+  hashManagedContent,
+  loadManagedAuth,
+  saveManagedAuth,
+  takeManagedImportRequest,
+  type ManagedAuth,
+  type ManagedImportRequest,
+} from '@/services/managed-subscription'
 import getSystem from '@/utils/get-system'
 
 const CODE_STORAGE_KEY = 'shenxianyun.accessCode'
@@ -236,6 +247,22 @@ type ValidVerifyResponse = VerifyResponse & {
 type UpdateStateResponse = {
   ok?: boolean
   update_version?: number
+  message?: string
+}
+
+type ImportTicketResponse = {
+  ok?: boolean
+  launch_url?: string
+  message?: string
+}
+
+type ImportExchangeResponse = {
+  ok?: boolean
+  name?: string
+  expires_at?: string
+  device_token?: string
+  subscription_url?: string
+  limit_mode?: string
   message?: string
 }
 
@@ -674,6 +701,18 @@ const HomePage = () => {
   const [nowMs, setNowMs] = useState(() => Date.now())
   const trafficTotalsRef = useRef({ upload: 0, download: 0 })
   const lastReportedTrafficRef = useRef({ upload: 0, download: 0 })
+  const trafficCounterRef = useRef({
+    id: '',
+    sequence: 0,
+    baseUpload: 0,
+    baseDownload: 0,
+  })
+  const pendingTrafficRef = useRef<{
+    sequence: number
+    uploadTotal: number
+    downloadTotal: number
+  } | null>(null)
+  const managedAuthRef = useRef<ManagedAuth | null>(null)
   const proxyUrlRef = useRef('')
   const legacyMigrationRef = useRef('')
 
@@ -691,8 +730,7 @@ const HomePage = () => {
     return [...(nodeGroup?.all || [])]
       .filter((proxy) => !['DIRECT', 'REJECT'].includes(proxy.name))
       .sort(
-        (a, b) =>
-          delayRank(a, nodeGroup?.name) - delayRank(b, nodeGroup?.name),
+        (a, b) => delayRank(a, nodeGroup?.name) - delayRank(b, nodeGroup?.name),
       )
   }, [nodeGroup, delaySortTick])
 
@@ -803,6 +841,201 @@ const HomePage = () => {
     [],
   )
 
+  const persistManagedAuth = useCallback(async (auth: ManagedAuth | null) => {
+    if (auth) {
+      await saveManagedAuth(auth)
+    } else {
+      await clearManagedAuth()
+    }
+    managedAuthRef.current = auth
+  }, [])
+
+  const requestImportTicket = useCallback(
+    async (input: string, apiBase = getApiBase()) => {
+      const response = await apiFetch(`${apiBase}/api/import/ticket`, {
+        method: 'POST',
+        connectTimeout: 8000,
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': CLIENT_UA,
+          'X-Client-Id': getClientId(),
+          'X-Client-Type': 'shenxianyun-windows',
+        },
+        body: JSON.stringify({ code: input, target: 'shenxianyun' }),
+      })
+      const data = (await response.json()) as ImportTicketResponse
+      const ticket = extractTicketFromLaunchUrl(data.launch_url || '')
+      if (!response.ok || !data.ok || !ticket) {
+        throw new AccessCodeStateError(
+          data.message || '无法创建安全导入票据',
+          response.status === 403,
+        )
+      }
+      return ticket
+    },
+    [apiFetch],
+  )
+
+  const exchangeImportTicket = useCallback(
+    async (request: ManagedImportRequest) => {
+      const response = await apiFetch(
+        `${request.apiBase}/api/import/exchange`,
+        {
+          method: 'POST',
+          connectTimeout: 8000,
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': CLIENT_UA,
+            'X-Client-Id': getClientId(),
+            'X-Client-Type': 'shenxianyun-windows',
+          },
+          body: JSON.stringify({
+            ticket: request.ticket,
+            client_id: getClientId(),
+            platform: DESKTOP_PLATFORM,
+          }),
+        },
+      )
+      const data = (await response.json()) as ImportExchangeResponse
+      if (
+        !response.ok ||
+        !data.ok ||
+        !data.device_token ||
+        !data.subscription_url
+      ) {
+        throw new AccessCodeStateError(
+          data.message || '安全导入票据无效或已过期',
+          response.status === 403 || response.status === 410,
+        )
+      }
+      return data as Required<
+        Pick<
+          ImportExchangeResponse,
+          'device_token' | 'subscription_url' | 'expires_at' | 'limit_mode'
+        >
+      > &
+        ImportExchangeResponse
+    },
+    [apiFetch],
+  )
+
+  const fetchManagedSubscription = useCallback(
+    async (auth: Pick<ManagedAuth, 'subscriptionUrl' | 'deviceToken'>) => {
+      const response = await apiFetch(auth.subscriptionUrl, {
+        method: 'GET',
+        connectTimeout: 12000,
+        headers: {
+          Authorization: `Bearer ${auth.deviceToken}`,
+          'User-Agent': CLIENT_UA,
+          'X-Client-Id': getClientId(),
+          'X-Client-Type': 'shenxianyun-windows',
+        },
+      })
+      if (!response.ok) {
+        const message = await response.text().catch(() => '')
+        throw new AccessCodeStateError(
+          message || '受管订阅获取失败，请重新导入提取码',
+          response.status === 401 || response.status === 403,
+        )
+      }
+      const content = await response.text()
+      if (!content.trim()) throw new Error('受管订阅内容为空')
+      return content
+    },
+    [apiFetch],
+  )
+
+  const installManagedSubscription = useCallback(
+    async (
+      input: string,
+      exchange: Awaited<ReturnType<typeof exchangeImportTicket>>,
+      apiBase: string,
+    ) => {
+      const content = await fetchManagedSubscription({
+        subscriptionUrl: exchange.subscription_url,
+        deviceToken: exchange.device_token,
+      })
+      const prevCodeProfileUid =
+        localStorage.getItem(CODE_PROFILE_UID_KEY) || ''
+      await createProfile(
+        {
+          type: 'local',
+          name: input,
+          desc: '受保护的提取码订阅；地址仅由客户端安全保存',
+          url: '',
+          option: {
+            with_proxy: false,
+            self_proxy: false,
+            allow_auto_update: false,
+          },
+        } as IProfileItem,
+        content,
+      )
+      const list = await getProfiles()
+      const newest = list.items?.at(-1)
+      if (!newest?.uid) throw new Error('无法定位新导入的订阅')
+
+      try {
+        const auth: ManagedAuth = {
+          accessCode: input,
+          profileUid: newest.uid,
+          apiBase,
+          subscriptionUrl: exchange.subscription_url,
+          deviceToken: exchange.device_token,
+          expiresAt: exchange.expires_at || '',
+          limitMode: exchange.limit_mode || 'hybrid',
+          contentHash: await hashManagedContent(content),
+          detached: false,
+          updateVersion: 0,
+        }
+        await persistManagedAuth(auth)
+        if (prevCodeProfileUid && prevCodeProfileUid !== newest.uid) {
+          await deleteProfile(prevCodeProfileUid).catch(() => undefined)
+        }
+        localStorage.setItem(CODE_PROFILE_UID_KEY, newest.uid)
+        localStorage.setItem(CODE_STORAGE_KEY, input)
+        localStorage.setItem(
+          CODE_EXPIRES_STORAGE_KEY,
+          exchange.expires_at || '',
+        )
+        localStorage.setItem(
+          CODE_UPDATE_VERSION_STORAGE_KEY,
+          String(auth.updateVersion),
+        )
+        const profilesConfig = await getProfiles()
+        await patchProfilesConfig({ ...profilesConfig, current: newest.uid })
+        await ensureDomesticApiDirect().catch(() => undefined)
+        setSavedCode(input)
+        setExpiresAt(exchange.expires_at || '')
+        await mutateProfiles()
+        await refreshAll()
+        return {
+          expires_at: exchange.expires_at || '',
+          update_version: auth.updateVersion,
+          subscription_url: '',
+        } satisfies ValidVerifyResponse
+      } catch (error) {
+        await deleteProfile(newest.uid).catch(() => undefined)
+        throw error
+      }
+    },
+    [fetchManagedSubscription, mutateProfiles, persistManagedAuth, refreshAll],
+  )
+
+  useEffect(() => {
+    loadManagedAuth()
+      .then((auth) => {
+        if (managedAuthRef.current === null) {
+          managedAuthRef.current = auth
+        }
+      })
+      .catch(() => {
+        if (managedAuthRef.current === null) {
+          setStatus('受管订阅凭据不可用，请重新导入提取码')
+        }
+      })
+  }, [])
+
   const verifyCode = useCallback(
     async (input: string, countImport = true): Promise<ValidVerifyResponse> => {
       const params = new URLSearchParams({
@@ -905,10 +1138,105 @@ const HomePage = () => {
     await restoreRuleSnapshot(profileUid, ruleSnapshot)
   }, [current?.uid])
 
+  const updateManagedProfile = useCallback(
+    async (remoteVersion: number, force = false) => {
+      const auth = managedAuthRef.current
+      if (!auth || auth.profileUid !== current?.uid) return false
+      if (auth.detached && !force) {
+        if (remoteVersion > auth.updateVersion) {
+          await persistManagedAuth({ ...auth, updateVersion: remoteVersion })
+        }
+        setStatus('当前订阅已在本地编辑，已停止远程覆盖')
+        return true
+      }
+
+      const localContent = await readProfileFile(auth.profileUid)
+      const localHash = await hashManagedContent(localContent)
+      if (!force && auth.contentHash && localHash !== auth.contentHash) {
+        await persistManagedAuth({
+          ...auth,
+          detached: true,
+          updateVersion: Math.max(auth.updateVersion, remoteVersion),
+        })
+        setStatus('检测到本地编辑，已转为本地配置并停止远程覆盖')
+        return true
+      }
+
+      const snapshot = await readRuleSnapshot(auth.profileUid)
+      const content = await fetchManagedSubscription(auth)
+      await saveProfileFile(auth.profileUid, content)
+      await restoreRuleSnapshot(auth.profileUid, snapshot)
+      const savedContent = await readProfileFile(auth.profileUid)
+      await persistManagedAuth({
+        ...auth,
+        contentHash: await hashManagedContent(savedContent),
+        detached: false,
+        updateVersion: remoteVersion,
+      })
+      return true
+    },
+    [current?.uid, fetchManagedSubscription, persistManagedAuth, setStatus],
+  )
+
+  const stopForServerLimit = useCallback(
+    async (message: string) => {
+      await patchVerge({ enable_tun_mode: false }).catch(() => undefined)
+      await toggleSystemProxy(false).catch(() => undefined)
+      await stopCore().catch(() => undefined)
+      await invalidateProxyState().catch(() => undefined)
+      setStatus(message)
+    },
+    [invalidateProxyState, patchVerge, toggleSystemProxy],
+  )
+
   const sendClientPresence = useCallback(
     async (online: boolean) => {
       const value = savedCode
       if (!value) return
+      const auth = managedAuthRef.current
+      if (auth?.accessCode === value) {
+        const endpoint = online ? 'heartbeat' : 'offline'
+        const response = await apiFetch(
+          `${auth.apiBase}/api/v2/client/${endpoint}`,
+          {
+            method: 'POST',
+            connectTimeout: 5000,
+            headers: {
+              Authorization: `Bearer ${auth.deviceToken}`,
+              'Content-Type': 'application/json',
+              'User-Agent': CLIENT_UA,
+              'X-Client-Id': getClientId(),
+              'X-Client-Type': 'shenxianyun-windows',
+            },
+            body: JSON.stringify({
+              platform: 'Windows电脑',
+              app_name: '神仙云桌面端',
+              app_version: DESKTOP_VERSION,
+              device_name: navigator.userAgent,
+            }),
+          },
+        )
+        const data = (await response.json().catch(() => null)) as {
+          ok?: boolean
+          code?: string
+          message?: string
+        } | null
+        if (!response.ok || !data?.ok) {
+          if (
+            online &&
+            (data?.code === 'device_limit' || data?.code === 'traffic_limit')
+          ) {
+            await stopForServerLimit(
+              data.message ||
+                (data.code === 'traffic_limit'
+                  ? '流量额度已用尽，代理已停止'
+                  : '在线设备数量已达到套餐上限，代理已停止'),
+            )
+          }
+          throw new Error(data?.message || '设备状态上报失败')
+        }
+        return
+      }
       const endpoint = online ? 'heartbeat' : 'offline'
       const params = new URLSearchParams({
         client_id: getClientId(),
@@ -939,7 +1267,7 @@ const HomePage = () => {
         )
       }
     },
-    [apiFetch, savedCode],
+    [apiFetch, savedCode, stopForServerLimit],
   )
 
   const reportClientTraffic = useCallback(async () => {
@@ -947,6 +1275,78 @@ const HomePage = () => {
     if (!value || !running) return
 
     const current = trafficTotalsRef.current
+    const auth = managedAuthRef.current
+    if (auth?.accessCode === value) {
+      const counter = trafficCounterRef.current
+      if (
+        current.upload < counter.baseUpload ||
+        current.download < counter.baseDownload
+      ) {
+        trafficCounterRef.current = {
+          id: crypto.randomUUID?.() || `traffic-${Date.now().toString(36)}`,
+          sequence: 0,
+          baseUpload: current.upload,
+          baseDownload: current.download,
+        }
+        pendingTrafficRef.current = null
+        return
+      }
+      const pending = pendingTrafficRef.current || {
+        sequence: counter.sequence + 1,
+        uploadTotal: current.upload - counter.baseUpload,
+        downloadTotal: current.download - counter.baseDownload,
+      }
+      if (pending.uploadTotal <= 0 && pending.downloadTotal <= 0) return
+      pendingTrafficRef.current = pending
+
+      const response = await apiFetch(`${auth.apiBase}/api/v2/client/traffic`, {
+        method: 'POST',
+        connectTimeout: 5000,
+        headers: {
+          Authorization: `Bearer ${auth.deviceToken}`,
+          'Content-Type': 'application/json',
+          'User-Agent': CLIENT_UA,
+          'X-Client-Id': getClientId(),
+          'X-Client-Type': 'shenxianyun-windows',
+        },
+        body: JSON.stringify({
+          counter_id: counter.id,
+          sequence: pending.sequence,
+          upload_total: pending.uploadTotal,
+          download_total: pending.downloadTotal,
+          platform: 'Windows电脑',
+          app_name: '神仙云桌面端',
+          app_version: DESKTOP_VERSION,
+          device_name: navigator.userAgent,
+        }),
+      })
+      const data = (await response.json().catch(() => null)) as {
+        ok?: boolean
+        duplicate?: boolean
+        code?: string
+        message?: string
+      } | null
+      if (response.status === 409 && data?.code === 'counter_reset') {
+        trafficCounterRef.current = {
+          id: crypto.randomUUID?.() || `traffic-${Date.now().toString(36)}`,
+          sequence: 0,
+          baseUpload: current.upload,
+          baseDownload: current.download,
+        }
+        pendingTrafficRef.current = null
+        return
+      }
+      if (!response.ok || !data?.ok) {
+        if (data?.code === 'traffic_limit') {
+          pendingTrafficRef.current = null
+          await stopForServerLimit(data.message || '流量额度已用尽，代理已停止')
+        }
+        throw new Error(data?.message || '客户端流量上报失败')
+      }
+      counter.sequence = pending.sequence
+      pendingTrafficRef.current = null
+      return
+    }
     const previous = lastReportedTrafficRef.current
     if (
       current.upload < previous.upload ||
@@ -998,7 +1398,7 @@ const HomePage = () => {
     }
     // 只有服务端明确确认成功才推进基线，失败增量留到下一轮重试。
     lastReportedTrafficRef.current = current
-  }, [apiFetch, running, savedCode])
+  }, [apiFetch, running, savedCode, stopForServerLimit])
 
   const activateCode = async (
     value: string,
@@ -1009,7 +1409,13 @@ const HomePage = () => {
     for (let attempt = 1; attempt <= retryCount; attempt += 1) {
       try {
         onPhase?.('checking')
-        const data = await verifyCode(value)
+        const apiBase = getApiBase()
+        const ticket = await requestImportTicket(value, apiBase)
+        const exchange = await exchangeImportTicket({
+          ticket,
+          apiBase,
+          name: value,
+        })
 
         // 切换到不同提取码时，先停代理再切换；同一提取码重新导入则无需停。
         if (savedCode && savedCode !== value && running) {
@@ -1020,46 +1426,8 @@ const HomePage = () => {
           }
         }
 
-        // 记录切换前的「提取码订阅」配置，导入新订阅后只删它，保留用户其它配置。
-        const prevCodeProfileUid =
-          localStorage.getItem(CODE_PROFILE_UID_KEY) || ''
-
-        // 不开启 clash verge 的周期性自动更新（那会无视内容是否变化、定时重下整个配置，浪费带宽）。
-        // 改为只靠后端 update_version 推送：仅当 /api/update-state 的版本号变大时才重新拉取订阅。
         onPhase?.('downloading')
-        await importProfile(data.subscription_url, {
-          with_proxy: true,
-          allow_auto_update: false,
-        })
-        await ensureDomesticApiDirect().catch(() => undefined)
-
-        const latestProfiles = await getProfiles()
-        const newestProfile = latestProfiles.items?.at(-1)
-        if (newestProfile?.uid) {
-          // 只删除上一张「提取码订阅」配置，绝不动用户手动导入/新建的配置与全局 Merge。
-          if (prevCodeProfileUid && prevCodeProfileUid !== newestProfile.uid) {
-            await deleteProfile(prevCodeProfileUid).catch(() => {})
-          }
-          localStorage.setItem(CODE_PROFILE_UID_KEY, newestProfile.uid)
-
-          const singleProfileConfig = await getProfiles()
-          await patchProfilesConfig({
-            ...singleProfileConfig,
-            current: newestProfile.uid,
-          })
-        }
-
-        localStorage.setItem(CODE_STORAGE_KEY, value)
-        localStorage.setItem(CODE_EXPIRES_STORAGE_KEY, data.expires_at || '')
-        localStorage.setItem(
-          CODE_UPDATE_VERSION_STORAGE_KEY,
-          String(data.update_version || 0),
-        )
-        setSavedCode(value)
-        setExpiresAt(data.expires_at || '')
-        await mutateProfiles()
-        await refreshAll()
-        return data
+        return await installManagedSubscription(value, exchange, apiBase)
       } catch (error) {
         lastError = error
         if (attempt < retryCount) {
@@ -1115,37 +1483,28 @@ const HomePage = () => {
   const recoverFromExpired = useCallback(async () => {
     const value = savedCode
     if (!value) return false
-    // verifyCode 在提取码仍失效/过期时会抛错，此时保持占位配置不变。
-    const prevCodeProfileUid = localStorage.getItem(CODE_PROFILE_UID_KEY) || ''
     const expiredUid = localStorage.getItem(EXPIRED_PROFILE_UID_KEY) || ''
-    const data = await verifyCode(value, false)
-    await importProfile(data.subscription_url, {
-      with_proxy: true,
-      allow_auto_update: false,
+    const apiBase = managedAuthRef.current?.apiBase || getApiBase()
+    const ticket = await requestImportTicket(value, apiBase)
+    const exchange = await exchangeImportTicket({
+      ticket,
+      apiBase,
+      name: value,
     })
-    await ensureDomesticApiDirect().catch(() => undefined)
-    const list = await getProfiles()
-    const newest = list.items?.at(-1)
-    if (newest?.uid) {
-      // 只删除到期占位配置和上一张提取码订阅，保留用户手动导入/新建的其它配置。
-      for (const uid of [expiredUid, prevCodeProfileUid]) {
-        if (uid && uid !== newest.uid) await deleteProfile(uid).catch(() => {})
-      }
-      localStorage.setItem(CODE_PROFILE_UID_KEY, newest.uid)
-      const single = await getProfiles()
-      await patchProfilesConfig({ ...single, current: newest.uid })
-    }
+    await installManagedSubscription(value, exchange, apiBase)
+    if (expiredUid) await deleteProfile(expiredUid).catch(() => undefined)
     localStorage.removeItem(EXPIRED_PROFILE_UID_KEY)
-    localStorage.setItem(CODE_EXPIRES_STORAGE_KEY, data.expires_at || '')
-    localStorage.setItem(
-      CODE_UPDATE_VERSION_STORAGE_KEY,
-      String(data.update_version || 0),
-    )
-    setExpiresAt(data.expires_at || '')
     await mutateProfiles()
     await refreshAll()
     return true
-  }, [savedCode, mutateProfiles, refreshAll, verifyCode])
+  }, [
+    exchangeImportTicket,
+    installManagedSubscription,
+    mutateProfiles,
+    refreshAll,
+    requestImportTicket,
+    savedCode,
+  ])
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 60_000)
@@ -1231,9 +1590,7 @@ const HomePage = () => {
     setServerCheckStatus('checking')
     const bases = listApiBases()
     const results = await Promise.all(
-      bases.map((base) =>
-        probeApiBase(base, proxyUrlRef.current || undefined),
-      ),
+      bases.map((base) => probeApiBase(base, proxyUrlRef.current || undefined)),
     )
     const connected = results.some(Boolean)
     if (connected) {
@@ -1298,8 +1655,23 @@ const HomePage = () => {
   useEffect(() => {
     if (!running || !savedCode) {
       lastReportedTrafficRef.current = trafficTotalsRef.current
+      trafficCounterRef.current = {
+        id: crypto.randomUUID?.() || `traffic-${Date.now().toString(36)}`,
+        sequence: 0,
+        baseUpload: trafficTotalsRef.current.upload,
+        baseDownload: trafficTotalsRef.current.download,
+      }
+      pendingTrafficRef.current = null
       return
     }
+
+    trafficCounterRef.current = {
+      id: crypto.randomUUID?.() || `traffic-${Date.now().toString(36)}`,
+      sequence: 0,
+      baseUpload: trafficTotalsRef.current.upload,
+      baseDownload: trafficTotalsRef.current.download,
+    }
+    pendingTrafficRef.current = null
 
     const timer = window.setInterval(() => {
       reportClientTraffic().catch(() => undefined)
@@ -1346,7 +1718,8 @@ const HomePage = () => {
         )
         if (remoteVersion > localVersion && current?.uid) {
           setStatus('检测到后台推送，正在更新订阅...')
-          await updateCurrentProfileKeepingRules()
+          const handled = await updateManagedProfile(remoteVersion)
+          if (!handled) await updateCurrentProfileKeepingRules()
           localStorage.setItem(
             CODE_UPDATE_VERSION_STORAGE_KEY,
             String(remoteVersion),
@@ -1422,6 +1795,7 @@ const HomePage = () => {
     running,
     savedCode,
     updateCurrentProfileKeepingRules,
+    updateManagedProfile,
     updateState,
   ])
 
@@ -1433,10 +1807,18 @@ const HomePage = () => {
     setBusy(true)
     setStatus('正在更新订阅...')
     try {
-      await updateCurrentProfileKeepingRules()
+      const remoteVersion = Number(
+        localStorage.getItem(CODE_UPDATE_VERSION_STORAGE_KEY) || 0,
+      )
+      const handled = await updateManagedProfile(remoteVersion, true)
+      if (!handled) await updateCurrentProfileKeepingRules()
       await mutateProfiles()
       await refreshAll()
-      setStatus('订阅已更新，同提取码规则已保留')
+      setStatus(
+        handled
+          ? '受管订阅已重新获取；本地编辑已恢复远程管理'
+          : '订阅已更新，同提取码规则已保留',
+      )
     } catch {
       setStatus('订阅更新失败，请稍后重试')
     } finally {
@@ -1534,6 +1916,9 @@ const HomePage = () => {
       if (localStorage.getItem(CODE_PROFILE_UID_KEY) === uid) {
         localStorage.removeItem(CODE_PROFILE_UID_KEY)
       }
+      if (managedAuthRef.current?.profileUid === uid) {
+        await persistManagedAuth(null)
+      }
       await mutateProfiles()
       await refreshAll()
       setStatus('已删除配置文件')
@@ -1557,9 +1942,21 @@ const HomePage = () => {
     if (!editorState) return
     try {
       await saveProfileFile(editorState.uid, editorState.value)
+      const auth = managedAuthRef.current
+      if (auth?.profileUid === editorState.uid) {
+        await persistManagedAuth({
+          ...auth,
+          detached: true,
+          contentHash: await hashManagedContent(editorState.value),
+        })
+      }
       await mutateProfiles()
       await refreshAll()
-      setStatus('配置已保存')
+      setStatus(
+        auth?.profileUid === editorState.uid
+          ? '配置已保存，并已转为本地管理；远程更新不会覆盖'
+          : '配置已保存',
+      )
       setEditorState(null)
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error))
@@ -1713,7 +2110,9 @@ const HomePage = () => {
       )
       setDelaySortTick((tick) => tick + 1)
       await refreshProxy()
-      setStatus('连通性测试完成：节点名后显示数字(毫秒)即代表连接正常，已按速度排序')
+      setStatus(
+        '连通性测试完成：节点名后显示数字(毫秒)即代表连接正常，已按速度排序',
+      )
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error))
     } finally {
@@ -1840,6 +2239,64 @@ const HomePage = () => {
 
     await sendClientPresence(true).catch(() => undefined)
   }
+
+  const importManagedRequest = useLockFn(
+    async (request: ManagedImportRequest) => {
+      setCodeDialogOpen(true)
+      setCodeImportMessage('')
+      setCodeImportPhase('checking')
+      setBusy(true)
+      try {
+        const exchange = await exchangeImportTicket(request)
+        const value = (exchange.name || request.name || '').trim()
+        if (!value) throw new Error('安全导入未返回提取码')
+        setCodeImportPhase('downloading')
+        const data = await installManagedSubscription(
+          value,
+          exchange,
+          request.apiBase,
+        )
+        setCodeImportPhase('starting')
+        await startImportedProfile()
+        setCodeImportPhase('success')
+        setCodeImportMessage(
+          `订阅已安全导入，网络连接正常${
+            data.expires_at ? `，到期 ${data.expires_at}` : ''
+          }`,
+        )
+        setStatus('订阅已安全导入，订阅地址不会显示')
+      } catch (error) {
+        setCodeImportPhase('error')
+        setCodeImportMessage(
+          error instanceof Error
+            ? error.message
+            : '安全导入失败，请返回网页重新点击一键导入',
+        )
+      } finally {
+        setBusy(false)
+      }
+    },
+  )
+
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    const consume = async () => {
+      const request = await takeManagedImportRequest().catch(() => null)
+      if (!disposed && request) await importManagedRequest(request)
+    }
+    listen('shenxianyun://managed-import', consume)
+      .then((stop) => {
+        if (disposed) stop()
+        else unlisten = stop
+      })
+      .catch(() => undefined)
+    consume().catch(() => undefined)
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [importManagedRequest])
 
   const importByCode = useLockFn(async () => {
     const value = code.trim()
@@ -1973,7 +2430,11 @@ const HomePage = () => {
             const ip = map.ip || ''
             // 只取 IPv4（trace 有时给 v6，v6 场景另有分支）
             if (ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip)) {
-              return { ip, cc: (map.loc || '').toUpperCase(), country: map.loc || '' }
+              return {
+                ip,
+                cc: (map.loc || '').toUpperCase(),
+                country: map.loc || '',
+              }
             }
           } catch {
             // 下一个
@@ -2004,9 +2465,15 @@ const HomePage = () => {
           const ip = String(d.ip ?? d.IP ?? '')
           if (!ip) continue
           const cc = String(
-            d.country_code ?? d.country ?? loc.country_code ?? loc.country ?? '',
+            d.country_code ??
+              d.country ??
+              loc.country_code ??
+              loc.country ??
+              '',
           ).toUpperCase()
-          const country = String(d.country_name ?? d.country ?? loc.country ?? '')
+          const country = String(
+            d.country_name ?? d.country ?? loc.country ?? '',
+          )
           return { ip, cc, country }
         } catch {
           // 试下一个
@@ -2458,6 +2925,7 @@ const HomePage = () => {
       }
       localStorage.removeItem(CODE_STORAGE_KEY)
       localStorage.removeItem(CODE_EXPIRES_STORAGE_KEY)
+      await persistManagedAuth(null).catch(() => undefined)
       // 6) 重启应用，生成全新干净配置（等于重装）
       await restartApp()
     } catch {
@@ -2741,7 +3209,13 @@ const HomePage = () => {
               >
                 神仙云
               </Typography>
-              <Typography sx={{ color: 'rgba(255,255,255,.92)', fontSize: 12, textShadow: '0 1px 8px rgba(90,110,220,.35)' }}>
+              <Typography
+                sx={{
+                  color: 'rgba(255,255,255,.92)',
+                  fontSize: 12,
+                  textShadow: '0 1px 8px rgba(90,110,220,.35)',
+                }}
+              >
                 提取码订阅 · 节点选择 · 一键连接
               </Typography>
             </Box>
@@ -2766,7 +3240,16 @@ const HomePage = () => {
               <Chip
                 size="small"
                 icon={<BoltRounded />}
-                sx={running ? { '&.MuiChip-root': { bgcolor: 'rgba(70,205,150,.32)', borderColor: 'rgba(70,205,150,.5)' } } : undefined}
+                sx={
+                  running
+                    ? {
+                        '&.MuiChip-root': {
+                          bgcolor: 'rgba(70,205,150,.32)',
+                          borderColor: 'rgba(70,205,150,.5)',
+                        },
+                      }
+                    : undefined
+                }
                 label={running ? '在线' : '离线'}
               />
               <Chip
@@ -3027,7 +3510,10 @@ const HomePage = () => {
                         color: '#fff',
                         fontWeight: 800,
                         boxShadow: '0 8px 20px rgba(95,123,240,.4)',
-                        '&:hover': { background: 'linear-gradient(135deg, #6f8af2, #4f66e8)' },
+                        '&:hover': {
+                          background:
+                            'linear-gradient(135deg, #6f8af2, #4f66e8)',
+                        },
                       }}
                     >
                       {savedCode ? '切换提取码' : '导入订阅'}
@@ -3179,7 +3665,9 @@ const HomePage = () => {
                     >
                       i
                     </Box>
-                    <Typography sx={{ fontSize: 12.5, color: '#33406e', fontWeight: 600 }}>
+                    <Typography
+                      sx={{ fontSize: 12.5, color: '#33406e', fontWeight: 600 }}
+                    >
                       测试连通性后，节点名后显示数字(毫秒)即代表该节点连接正常，可放心使用。
                     </Typography>
                   </Stack>
@@ -3404,10 +3892,12 @@ const HomePage = () => {
                           borderColor: 'rgba(45,65,105,.16)',
                           '&.Mui-selected': {
                             color: '#fff',
-                            background: 'linear-gradient(135deg, #5f7bf0, #4159e0)',
+                            background:
+                              'linear-gradient(135deg, #5f7bf0, #4159e0)',
                           },
                           '&.Mui-selected:hover': {
-                            background: 'linear-gradient(135deg, #536fee, #3a50d8)',
+                            background:
+                              'linear-gradient(135deg, #536fee, #3a50d8)',
                           },
                         },
                       }}
@@ -3907,9 +4397,7 @@ const HomePage = () => {
                 variant="contained"
                 color="success"
                 onClick={runSelfCheckFixAll}
-                disabled={
-                  selfChecking || !selfCheckItems.some((it) => it.fix)
-                }
+                disabled={selfChecking || !selfCheckItems.some((it) => it.fix)}
                 startIcon={<BuildRounded />}
                 sx={{ fontWeight: 800 }}
               >

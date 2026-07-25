@@ -184,6 +184,11 @@ pub fn get_encryption_key() -> Result<Vec<u8>> {
     let key_path = app_dir.join(".encryption_key");
 
     if key_path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
+        }
         // Read existing key
         fs::read(&key_path).map_err(|e| anyhow::anyhow!("Failed to read encryption key: {}", e))
     } else {
@@ -197,6 +202,11 @@ pub fn get_encryption_key() -> Result<Vec<u8>> {
         }
         // Save key
         fs::write(&key_path, &key).map_err(|e| anyhow::anyhow!("Failed to save encryption key: {}", e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
+        }
         Ok(key)
     }
 }
