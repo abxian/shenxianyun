@@ -54,11 +54,6 @@ fn restrict_file_permissions(path: &std::path::Path) -> CmdResult<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).stringify_err()
 }
 
-#[cfg(not(unix))]
-fn restrict_file_permissions(_path: &std::path::Path) -> CmdResult<()> {
-    Ok(())
-}
-
 #[tauri::command]
 pub fn take_managed_import_request() -> Option<ManagedImportRequest> {
     PENDING_MANAGED_IMPORT.lock().take()
@@ -96,6 +91,7 @@ pub fn save_managed_auth(auth: ManagedAuth) -> CmdResult<()> {
     let encrypted =
         encrypt_data(&json).map_err(|_| SmartString::from("受管订阅凭据加密失败"))?;
     fs::write(&path, encrypted.as_bytes()).stringify_err()?;
+    #[cfg(unix)]
     restrict_file_permissions(&path)?;
     Ok(())
 }
