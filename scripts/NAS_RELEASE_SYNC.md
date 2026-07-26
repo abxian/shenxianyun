@@ -23,6 +23,12 @@ NAS 使用 `nas-sync-release-to-dufs.py` 主动拉取正式资产，不再由 Ac
 `GITHUB_TOKEN`；如果 GitHub API 提示限流，可以仅在当前命令环境临时设置
 只读 token，不得写进脚本、Git 或日志。
 
+NAS 当前可访问 `api.github.com`，但直连 `github.com` 的 Release 文件可能
+超时。脚本默认先使用
+`https://gh-proxy.org/<GitHub 官方 Release URL>`，失败后再尝试 GitHub
+直连。无论下载来源如何，每个文件都必须通过 GitHub API 原始大小和
+SHA-256 digest 校验，否则不会发布。
+
 ## 使用
 
 先只检查 GitHub 元数据、版本和资产完整性，不下载大文件、不修改 Dufs：

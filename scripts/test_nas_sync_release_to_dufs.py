@@ -117,6 +117,19 @@ class BuildPlanTests(unittest.TestCase):
                     staging=Path(temporary),
                 )
 
+    def test_download_mirror_is_tried_before_direct_github(self) -> None:
+        asset = fake_asset("Clash.Verge.app.tar.gz")
+        urls = SYNC.candidate_download_urls(asset, "https://mirror.example/")
+        self.assertEqual(
+            urls,
+            [
+                "https://mirror.example/"
+                "https://github.com/abxian/shenxianyun/releases/download/"
+                "v1.2.3/Clash.Verge.app.tar.gz",
+                asset["browser_download_url"],
+            ],
+        )
+
 
 class AtomicPublishTests(unittest.TestCase):
     def test_success_backs_up_previous_files(self) -> None:

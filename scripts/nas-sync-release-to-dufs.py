@@ -34,6 +34,7 @@ DEFAULT_DUFS_ROOT = Path("/vol1/dufs/data/sxy")
 DEFAULT_BACKUP_ROOT = Path("/vol1/1000/docker-projects/backups")
 DEFAULT_WORK_ROOT = Path("/vol1/1000/docker-projects/shenxianyun-release-sync/work")
 DEFAULT_PUBLIC_BASE = "https://sxy.sxnn.de:5443/sxy"
+DEFAULT_DOWNLOAD_MIRROR = "https://gh-proxy.org"
 STABLE_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 CHUNK_SIZE = 1024 * 1024
 
@@ -76,6 +77,14 @@ def parse_args() -> argparse.Namespace:
         "--public-base",
         default=DEFAULT_PUBLIC_BASE,
         help=f"Public Dufs URL written to update.json (default: {DEFAULT_PUBLIC_BASE})",
+    )
+    parser.add_argument(
+        "--download-mirror",
+        default=DEFAULT_DOWNLOAD_MIRROR,
+        help=(
+            "Verified Release download mirror tried before direct GitHub "
+            f"(default: {DEFAULT_DOWNLOAD_MIRROR})"
+        ),
     )
     parser.add_argument(
         "--allow-downgrade",
@@ -161,10 +170,21 @@ def verify_download(path: Path, asset: dict[str, Any]) -> None:
         )
 
 
+def candidate_download_urls(asset: dict[str, Any], mirror: str) -> list[str]:
+    official = asset["browser_download_url"]
+    urls: list[str] = []
+    mirror = mirror.rstrip("/")
+    if mirror:
+        urls.append(f"{mirror}/{official}")
+    urls.append(official)
+    return urls
+
+
 def download_asset(
     asset: dict[str, Any],
     target: Path,
     *,
+    download_mirror: str,
     retries: int,
     timeout: int,
 ) -> None:
@@ -172,34 +192,48 @@ def download_asset(
     partial = target.with_name(target.name + ".part")
     partial.unlink(missing_ok=True)
     last_error: Exception | None = None
+    candidates = candidate_download_urls(asset, download_mirror)
     for attempt in range(1, retries + 1):
-        try:
-            print(f"[download {attempt}/{retries}] {asset['name']}")
-            with open_url(asset["browser_download_url"], api=False, timeout=timeout) as response:
-                with partial.open("wb") as output:
-                    shutil.copyfileobj(response, output, length=CHUNK_SIZE)
-                    output.flush()
-                    os.fsync(output.fileno())
-            verify_download(partial, asset)
-            os.replace(partial, target)
-            return
-        except (OSError, urllib.error.URLError, SyncError) as exc:
-            last_error = exc
-            partial.unlink(missing_ok=True)
-            if attempt < retries:
-                time.sleep(min(2**attempt, 15))
+        for url in candidates:
+            try:
+                host = urllib.parse.urlparse(url).netloc
+                print(
+                    f"[download {attempt}/{retries} via {host}] {asset['name']}",
+                    flush=True,
+                )
+                with open_url(url, api=False, timeout=timeout) as response:
+                    with partial.open("wb") as output:
+                        shutil.copyfileobj(response, output, length=CHUNK_SIZE)
+                        output.flush()
+                        os.fsync(output.fileno())
+                verify_download(partial, asset)
+                os.replace(partial, target)
+                return
+            except (OSError, urllib.error.URLError, SyncError) as exc:
+                last_error = exc
+                partial.unlink(missing_ok=True)
+                print(f"[download failed via {host}] {exc}", file=sys.stderr)
+        if attempt < retries:
+            time.sleep(min(2**attempt, 15))
     raise SyncError(f"download failed for {asset['name']}: {last_error}")
 
 
 def download_asset_bytes(
     asset: dict[str, Any],
     *,
+    download_mirror: str,
     retries: int,
     timeout: int,
 ) -> bytes:
     with tempfile.TemporaryDirectory(prefix="sxy-release-json-") as temporary:
         target = Path(temporary) / asset["name"]
-        download_asset(asset, target, retries=retries, timeout=timeout)
+        download_asset(
+            asset,
+            target,
+            download_mirror=download_mirror,
+            retries=retries,
+            timeout=timeout,
+        )
         return target.read_bytes()
 
 
@@ -528,6 +562,7 @@ def main() -> int:
         raise SyncError("updater Release has no update.json asset")
     raw_update = download_asset_bytes(
         updater_asset,
+        download_mirror=args.download_mirror,
         retries=args.retries,
         timeout=args.timeout,
     )
@@ -588,6 +623,7 @@ def main() -> int:
                 download_asset(
                     release_assets[name],
                     staging / "downloads" / name,
+                    download_mirror=args.download_mirror,
                     retries=args.retries,
                     timeout=args.timeout,
                 )
