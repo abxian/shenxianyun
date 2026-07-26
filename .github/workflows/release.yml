@@ -167,10 +167,13 @@ jobs:
             target: aarch64-pc-windows-msvc
           - os: macos-latest
             target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v6
@@ -201,6 +204,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxslt1.1 libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
+      - name: Install dependencies (macOS Intel only)
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          brew install openssl@3
+          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+          echo "OPENSSL_INCLUDE_DIR=$(brew --prefix openssl@3)/include" >> "$GITHUB_ENV"
+          echo "OPENSSL_LIB_DIR=$(brew --prefix openssl@3)/lib" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "$GITHUB_ENV"
+
       - name: Install Node
         uses: actions/setup-node@v6
         with:
@@ -211,10 +224,29 @@ jobs:
         with:
           run_install: false
 
-      - name: Pnpm install and check
+      - name: Pnpm install
+        run: pnpm i
+
+      - name: Prepare macOS Intel alpha sidecar
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: bash
         run: |
-          pnpm i
-          pnpm run prebuild ${{ matrix.target }}
+          set -euo pipefail
+          ALPHA_VERSION=$(curl --fail --silent --show-error --location \
+            --retry 8 --retry-all-errors --retry-delay 10 \
+            https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/version.txt)
+          ALPHA_ARCHIVE="mihomo-darwin-amd64-v1-go122-${ALPHA_VERSION}.gz"
+          ALPHA_SIDECAR="src-tauri/sidecar/verge-mihomo-alpha-${{ matrix.target }}"
+          mkdir -p src-tauri/sidecar
+          curl --fail --silent --show-error --location \
+            --retry 8 --retry-all-errors --retry-delay 10 \
+            "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/$ALPHA_ARCHIVE" \
+            -o "$RUNNER_TEMP/$ALPHA_ARCHIVE"
+          gzip -dc "$RUNNER_TEMP/$ALPHA_ARCHIVE" > "$ALPHA_SIDECAR"
+          chmod 755 "$ALPHA_SIDECAR"
+
+      - name: Prepare build resources
+        run: pnpm run prebuild ${{ matrix.target }}
 
       - name: Add Rust Target
         run: |
@@ -557,11 +589,8 @@ jobs:
         run: pnpm updater
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 自有 dufs 第一更新通道：更新包与 update.json 自动发布到 dufs
-          DUFS_BASE: ${{ secrets.DUFS_BASE }}
-          DUFS_PUBLIC_BASE: https://sxy.sxnn.de:5443/sxy
-          DUFS_USER: ${{ secrets.DUFS_USER }}
-          DUFS_PASS: ${{ secrets.DUFS_PASS }}
+          # Actions 只维护 GitHub updater；Dufs 由 NAS 拉取脚本校验后原子发布。
+          ENABLE_DUFS_PUBLISH: 'false'
 
   release-update-for-fixed-webview2:
     if: ${{ !contains(github.ref_name, '-rc') }}

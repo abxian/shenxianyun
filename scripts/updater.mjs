@@ -292,12 +292,16 @@ async function processRelease(github, options, tag, isAlpha) {
         `Successfully uploaded ${isAlpha ? 'alpha' : 'stable'} update files to ${releaseTag}`,
       )
 
-      // 自有 dufs 是第一更新通道：把更新包搬运到 dufs 并发布 update.json（仅稳定版）
-      if (!isAlpha) {
+      // Dufs 只允许显式启用；生产发布默认改由 NAS 拉取并原子切换。
+      if (!isAlpha && process.env.ENABLE_DUFS_PUBLISH === 'true') {
         await publishToDufs(updateData, release.assets).catch((err) => {
           console.error('[dufs] publish failed:', err.message)
           process.exitCode = 1
         })
+      } else if (!isAlpha) {
+        console.log(
+          '[dufs] direct Actions publish disabled; NAS pull is authoritative',
+        )
       }
     } catch (error) {
       console.error(

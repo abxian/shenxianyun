@@ -12,11 +12,6 @@ on:
         required: false
         default: false
         type: boolean
-      publish_dufs:
-        description: 'Upload bundles and update metadata on Dufs'
-        required: false
-        default: true
-        type: boolean
 
 permissions: write-all
 
@@ -30,6 +25,7 @@ jobs:
   build-macos-intel:
     name: Build macOS Intel
     runs-on: macos-15-intel
+    timeout-minutes: 90
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v6
@@ -179,67 +175,6 @@ jobs:
             ${{ env.DMG }}
             ${{ env.UPDATER }}
             ${{ env.SIG }}
-
-      - name: Upload Intel bundles to Dufs
-        if: ${{ inputs.publish_dufs }}
-        shell: bash
-        env:
-          DUFS_BASE: ${{ secrets.DUFS_BASE }}
-          DUFS_PUBLIC_BASE: https://sxy.sxnn.de:5443/sxy
-          DUFS_USER: ${{ secrets.DUFS_USER }}
-          DUFS_PASS: ${{ secrets.DUFS_PASS }}
-        run: |
-          set -euo pipefail
-          AUTH="$DUFS_USER:$DUFS_PASS"
-          BASE="${DUFS_BASE%/}"
-          PUBLIC="${DUFS_PUBLIC_BASE%/}"
-
-          upload_verified() {
-            local source="$1"
-            local target="$2"
-            local expected actual
-            expected=$(stat -f %z "$source")
-            actual=$(curl --fail --silent --show-error --max-time 30 -u "$AUTH" -I "$target" \
-              | awk 'BEGIN{IGNORECASE=1} /^content-length:/ {gsub("\\r", "", $2); print $2}' | tail -1 || true)
-            if [ "$actual" = "$expected" ]; then
-              echo "Dufs already has $(basename "$target") ($expected bytes), skipping"
-              return
-            fi
-            curl --fail --silent --show-error --retry 4 --retry-all-errors \
-              --connect-timeout 20 --max-time 1200 -u "$AUTH" -T "$source" "$target"
-            actual=$(curl --fail --silent --show-error --max-time 30 -u "$AUTH" -I "$target" \
-              | awk 'BEGIN{IGNORECASE=1} /^content-length:/ {gsub("\\r", "", $2); print $2}' | tail -1)
-            if [ "$actual" != "$expected" ]; then
-              echo "::error::Dufs size mismatch for $target: $actual/$expected"
-              exit 1
-            fi
-          }
-
-          INTEL_DMG="Clash.Verge_${VERSION}_x64.dmg"
-          UPDATER_NAME='Clash.Verge.app.tar.gz'
-          SIG_NAME="$UPDATER_NAME.sig"
-          upload_verified "$DMG" "$BASE/$INTEL_DMG"
-          upload_verified "$DMG" "$BASE/%E7%A5%9E%E4%BB%99%E4%BA%91-Intel.dmg"
-          upload_verified "$UPDATER" "$BASE/updater/$UPDATER_NAME"
-          upload_verified "$SIG" "$BASE/updater/$SIG_NAME"
-
-          curl --fail --silent --show-error --max-time 30 -u "$AUTH" "$BASE/update.json" \
-            > "$RUNNER_TEMP/update.json"
-          if [ "$(jq -r .version "$RUNNER_TEMP/update.json")" != "$VERSION" ]; then
-            echo "::error::Dufs update.json is not v$VERSION"
-            exit 1
-          fi
-
-          SIGNATURE=$(cat "$SIG")
-          UPDATER_URL="$PUBLIC/updater/$UPDATER_NAME"
-          jq --arg url "$UPDATER_URL" --arg signature "$SIGNATURE" '
-            .platforms.darwin = {url: $url, signature: $signature}
-            | .platforms["darwin-intel"] = {url: $url, signature: $signature}
-            | .platforms["darwin-x86_64"] = {url: $url, signature: $signature}
-          ' "$RUNNER_TEMP/update.json" > "$RUNNER_TEMP/update-intel.json"
-          curl --fail --silent --show-error --retry 3 --retry-all-errors --max-time 60 \
-            -u "$AUTH" -X PUT -H 'Content-Type: application/json' \
-            --data-binary @"$RUNNER_TEMP/update-intel.json" "$BASE/update.json"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7
