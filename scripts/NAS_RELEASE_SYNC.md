@@ -25,7 +25,7 @@ NAS 使用 `nas-sync-release-to-dufs.py` 主动拉取正式资产，不再由 Ac
 
 NAS 当前可访问 `api.github.com`，但直连 `github.com` 的 Release 文件可能
 超时。脚本默认先使用
-`https://gh-proxy.org/<GitHub 官方 Release URL>`，失败后再尝试 GitHub
+`https://gh-proxy.com/<GitHub 官方 Release URL>`，失败后再尝试 GitHub
 直连。无论下载来源如何，每个文件都必须通过 GitHub API 原始大小和
 SHA-256 digest 校验，否则不会发布。
 

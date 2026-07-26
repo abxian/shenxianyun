@@ -34,7 +34,7 @@ DEFAULT_DUFS_ROOT = Path("/vol1/dufs/data/sxy")
 DEFAULT_BACKUP_ROOT = Path("/vol1/1000/docker-projects/backups")
 DEFAULT_WORK_ROOT = Path("/vol1/1000/docker-projects/shenxianyun-release-sync/work")
 DEFAULT_PUBLIC_BASE = "https://sxy.sxnn.de:5443/sxy"
-DEFAULT_DOWNLOAD_MIRROR = "https://gh-proxy.org"
+DEFAULT_DOWNLOAD_MIRROR = "https://gh-proxy.com"
 STABLE_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 CHUNK_SIZE = 1024 * 1024
 
