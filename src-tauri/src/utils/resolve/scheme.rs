@@ -212,8 +212,8 @@ mod tests {
         let link = Url::parse(
             "shenxianyun://install-config?ticket=one-time-secret&api=https%3A%2F%2Fapi.example.test%3A5443&name=demo",
         )?;
-        let request = extract_managed_import_request(&link)
-            .ok_or_else(|| anyhow::anyhow!("protected request was not parsed"))?;
+        let request =
+            extract_managed_import_request(&link).ok_or_else(|| anyhow::anyhow!("protected request was not parsed"))?;
         assert_eq!(request.ticket, "one-time-secret");
         assert_eq!(request.api_base, "https://api.example.test:5443");
         assert_eq!(request.name.as_deref(), Some("demo"));
@@ -222,25 +222,20 @@ mod tests {
 
     #[test]
     fn rejects_protected_import_without_ticket_or_http_api() -> anyhow::Result<()> {
-        let missing_ticket =
-            Url::parse("shenxianyun://install-config?api=https%3A%2F%2Fapi.example.test")?;
+        let missing_ticket = Url::parse("shenxianyun://install-config?api=https%3A%2F%2Fapi.example.test")?;
         assert!(extract_managed_import_request(&missing_ticket).is_none());
 
-        let unsafe_api = Url::parse(
-            "shenxianyun://install-config?ticket=secret&api=file%3A%2F%2F%2Ftmp%2Fconfig",
-        )?;
+        let unsafe_api = Url::parse("shenxianyun://install-config?ticket=secret&api=file%3A%2F%2F%2Ftmp%2Fconfig")?;
         assert!(extract_managed_import_request(&unsafe_api).is_none());
         Ok(())
     }
 
     #[test]
     fn keeps_legacy_url_import_compatible() -> anyhow::Result<()> {
-        let link = Url::parse(
-            "shenxianyun://install-config?url=https%3A%2F%2Fexample.test%2Fsub%2Fcode&name=legacy",
-        )?;
+        let link = Url::parse("shenxianyun://install-config?url=https%3A%2F%2Fexample.test%2Fsub%2Fcode&name=legacy")?;
         assert!(extract_managed_import_request(&link).is_none());
-        let (url, name) = extract_subscription_info(&link)
-            .ok_or_else(|| anyhow::anyhow!("legacy request was not parsed"))?;
+        let (url, name) =
+            extract_subscription_info(&link).ok_or_else(|| anyhow::anyhow!("legacy request was not parsed"))?;
         assert_eq!(url, "https://example.test/sub/code");
         assert_eq!(name.as_deref(), Some("legacy"));
         Ok(())
