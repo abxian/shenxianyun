@@ -132,10 +132,15 @@ import {
   listImportNodeCandidates,
   rankHealthyImportNodes,
 } from '@/utils/import-node-health'
+import {
+  planSubscriptionRefresh,
+  type SubscriptionRefreshReason,
+} from '@/utils/subscription-refresh'
 
 const CODE_STORAGE_KEY = 'shenxianyun.accessCode'
 const CODE_EXPIRES_STORAGE_KEY = 'shenxianyun.accessExpiresAt'
 const CODE_UPDATE_VERSION_STORAGE_KEY = 'shenxianyun.updateVersion'
+const STARTUP_REFRESH_SESSION_KEY = 'shenxianyun.startupSubscriptionRefresh.v1'
 const CLIENT_ID_STORAGE_KEY = 'shenxianyun.clientId'
 // 到期占位配置的本地 UID，续费恢复后用它定位并删除占位配置。
 const EXPIRED_PROFILE_UID_KEY = 'shenxianyun.expiredProfileUid'
@@ -144,6 +149,7 @@ const CODE_PROFILE_UID_KEY = 'shenxianyun.codeProfileUid'
 const DELAY_TIMEOUT = 5000
 // 服务端以 3 分钟内 last_seen 判断在线，60 秒心跳留足网络抖动余量。
 const HEARTBEAT_INTERVAL_MS = 60_000
+const ACCOUNT_STATE_SYNC_INTERVAL_MS = 60_000
 const TRAFFIC_REPORT_INTERVAL_MS = 300_000
 const MAX_TRAFFIC_REPORT_DELTA = 5 * 1024 * 1024 * 1024
 // 订阅更新轮询：仅在已连接时运行，基础间隔 10 分钟，失败时指数退避到最多 1 小时。
@@ -306,8 +312,14 @@ type ManagedInstallTransaction = {
 type UpdateStateResponse = {
   ok?: boolean
   update_version?: number
+  expires_at?: string | null
   message?: string
 }
+
+type ManagedProfileUpdateResult =
+  | 'managed-updated'
+  | 'managed-detached'
+  | 'unmanaged'
 
 type ImportTicketResponse = {
   ok?: boolean
@@ -515,6 +527,7 @@ const readRuleSnapshot = async (
 const restoreRuleSnapshot = async (
   profileUid: string | undefined,
   snapshot: RuleSnapshot | null,
+  options?: { suppressValidationNotice?: boolean },
 ) => {
   if (!profileUid || !snapshot) return
 
@@ -531,6 +544,7 @@ const restoreRuleSnapshot = async (
   const saved = await saveProfileFile(
     profileUid,
     yaml.dump(data, { lineWidth: -1 }),
+    options,
   )
   if (!saved) throw new Error('规则恢复后的配置验证失败')
 }
@@ -793,6 +807,9 @@ const HomePage = () => {
     downloadTotal: number
   } | null>(null)
   const managedAuthRef = useRef<ManagedAuth | null>(null)
+  // eslint-disable-next-line @eslint-react/no-unused-state -- readiness is consumed by the subscription lifecycle effect, not JSX.
+  const [managedAuthReady, setManagedAuthReady] = useState(false)
+  const startupRefreshAttemptedRef = useRef(false)
   const proxyUrlRef = useRef('')
   const legacyMigrationRef = useRef('')
 
@@ -934,6 +951,24 @@ const HomePage = () => {
     }
     managedAuthRef.current = auth
   }, [])
+
+  const syncExpiresAt = useCallback(
+    async (value: string | null | undefined) => {
+      // undefined 表示旧服务端没有返回这个兼容字段；null/空串表示永久有效。
+      if (value === undefined) return false
+      const nextExpiresAt = typeof value === 'string' ? value.trim() : ''
+      if (nextExpiresAt === expiresAt) return false
+
+      localStorage.setItem(CODE_EXPIRES_STORAGE_KEY, nextExpiresAt)
+      setExpiresAt(nextExpiresAt)
+      const auth = managedAuthRef.current
+      if (auth && auth.expiresAt !== nextExpiresAt) {
+        await persistManagedAuth({ ...auth, expiresAt: nextExpiresAt })
+      }
+      return true
+    },
+    [expiresAt, persistManagedAuth],
+  )
 
   const requestImportTicket = useCallback(
     async (input: string, apiBase = getApiBase()) => {
@@ -1241,6 +1276,7 @@ const HomePage = () => {
           setStatus('受管订阅凭据不可用，请重新导入提取码')
         }
       })
+      .finally(() => setManagedAuthReady(true))
   }, [])
 
   const verifyCode = useCallback(
@@ -1336,39 +1372,57 @@ const HomePage = () => {
     }
   }, [])
 
-  const updateCurrentProfileKeepingRules = useCallback(async () => {
-    const profileUid = current?.uid
-    if (!profileUid) return
+  const updateCurrentProfileKeepingRules = useCallback(
+    async (suppressFailureNotice = false) => {
+      const profileUid = current?.uid
+      if (!profileUid) return
 
-    const previousContent = await readProfileFile(profileUid)
-    const ruleSnapshot = await readRuleSnapshot(profileUid)
-    try {
-      await updateProfile(profileUid, { with_proxy: true })
-      await restoreRuleSnapshot(profileUid, ruleSnapshot)
-    } catch (error) {
-      const restored = await saveProfileFile(profileUid, previousContent).catch(
-        () => false,
-      )
-      const message = error instanceof Error ? error.message : String(error)
-      throw new Error(
-        restored
-          ? `${message}；已恢复更新前订阅`
-          : `${message}；更新前订阅也未能自动恢复`,
-        { cause: error },
-      )
-    }
-  }, [current?.uid])
+      const previousContent = await readProfileFile(profileUid)
+      const ruleSnapshot = await readRuleSnapshot(profileUid)
+      try {
+        await updateProfile(
+          profileUid,
+          { with_proxy: true },
+          { suppressFailureNotice },
+        )
+        await restoreRuleSnapshot(profileUid, ruleSnapshot, {
+          suppressValidationNotice: suppressFailureNotice,
+        })
+      } catch (error) {
+        const restored = await saveProfileFile(profileUid, previousContent, {
+          suppressValidationNotice: suppressFailureNotice,
+        }).catch(() => false)
+        const message = error instanceof Error ? error.message : String(error)
+        throw new Error(
+          restored
+            ? `${message}；已恢复更新前订阅`
+            : `${message}；更新前订阅也未能自动恢复`,
+          { cause: error },
+        )
+      }
+    },
+    [current?.uid],
+  )
 
   const updateManagedProfile = useCallback(
-    async (remoteVersion: number, force = false) => {
+    async (
+      remoteVersion: number,
+      options?: {
+        force?: boolean
+        suppressValidationNotice?: boolean
+      },
+    ): Promise<ManagedProfileUpdateResult> => {
+      const force = options?.force ?? false
+      const suppressValidationNotice =
+        options?.suppressValidationNotice ?? false
       const auth = managedAuthRef.current
-      if (!auth || auth.profileUid !== current?.uid) return false
+      if (!auth || auth.profileUid !== current?.uid) return 'unmanaged'
       if (auth.detached && !force) {
         if (remoteVersion > auth.updateVersion) {
           await persistManagedAuth({ ...auth, updateVersion: remoteVersion })
         }
         setStatus('当前订阅已在本地编辑，已停止远程覆盖')
-        return true
+        return 'managed-detached'
       }
 
       const localContent = await readProfileFile(auth.profileUid)
@@ -1380,27 +1434,30 @@ const HomePage = () => {
           updateVersion: Math.max(auth.updateVersion, remoteVersion),
         })
         setStatus('检测到本地编辑，已转为本地配置并停止远程覆盖')
-        return true
+        return 'managed-detached'
       }
 
       const snapshot = await readRuleSnapshot(auth.profileUid)
       const content = await fetchManagedSubscription(auth)
-      const saved = await saveProfileFile(auth.profileUid, content)
+      const saved = await saveProfileFile(auth.profileUid, content, {
+        suppressValidationNotice,
+      })
       if (!saved) throw new Error('远程订阅内容验证失败，已保留原配置')
       try {
-        await restoreRuleSnapshot(auth.profileUid, snapshot)
+        await restoreRuleSnapshot(auth.profileUid, snapshot, {
+          suppressValidationNotice,
+        })
         const savedContent = await readProfileFile(auth.profileUid)
         await persistManagedAuth({
           ...auth,
           contentHash: await hashManagedContent(savedContent),
           detached: false,
-          updateVersion: remoteVersion,
+          updateVersion: Math.max(auth.updateVersion, remoteVersion),
         })
       } catch (error) {
-        const restored = await saveProfileFile(
-          auth.profileUid,
-          localContent,
-        ).catch(() => false)
+        const restored = await saveProfileFile(auth.profileUid, localContent, {
+          suppressValidationNotice,
+        }).catch(() => false)
         const message = error instanceof Error ? error.message : String(error)
         throw new Error(
           restored
@@ -1409,7 +1466,7 @@ const HomePage = () => {
           { cause: error },
         )
       }
-      return true
+      return 'managed-updated'
     },
     [current?.uid, fetchManagedSubscription, persistManagedAuth, setStatus],
   )
@@ -1456,6 +1513,7 @@ const HomePage = () => {
           ok?: boolean
           code?: string
           message?: string
+          expires_at?: string | null
         } | null
         if (!response.ok || !data?.ok) {
           if (
@@ -1471,6 +1529,7 @@ const HomePage = () => {
           }
           throw new Error(data?.message || '设备状态上报失败')
         }
+        if (online) await syncExpiresAt(data.expires_at)
         return
       }
       const endpoint = online ? 'heartbeat' : 'offline'
@@ -1496,14 +1555,16 @@ const HomePage = () => {
       const data = (await response.json().catch(() => null)) as {
         ok?: boolean
         message?: string
+        expires_at?: string | null
       } | null
       if (!response.ok || !data?.ok) {
         throw new Error(
           data?.message || `客户端${online ? '心跳' : '离线'}上报失败`,
         )
       }
+      if (online) await syncExpiresAt(data.expires_at)
     },
-    [apiFetch, currentCode, stopForServerLimit],
+    [apiFetch, currentCode, stopForServerLimit, syncExpiresAt],
   )
 
   const reportClientTraffic = useCallback(async () => {
@@ -1809,17 +1870,22 @@ const HomePage = () => {
             allow_auto_update: false,
           },
         })
-        await updateProfile(current.uid, { with_proxy: true })
-        await restoreRuleSnapshot(current.uid, ruleSnapshot)
+        await updateProfile(
+          current.uid,
+          { with_proxy: true },
+          { suppressFailureNotice: true },
+        )
+        await restoreRuleSnapshot(current.uid, ruleSnapshot, {
+          suppressValidationNotice: true,
+        })
         localStorage.setItem(CODE_STORAGE_KEY, value)
         localStorage.setItem(CODE_PROFILE_UID_KEY, current.uid)
-        localStorage.setItem(CODE_EXPIRES_STORAGE_KEY, data.expires_at || '')
         localStorage.setItem(
           CODE_UPDATE_VERSION_STORAGE_KEY,
           String(data.update_version || 0),
         )
         setSavedCode(value)
-        setExpiresAt(data.expires_at || '')
+        await syncExpiresAt(data.expires_at || '')
         setCodeProfileUid(current.uid)
         await mutateProfiles()
         await refreshAll()
@@ -1834,6 +1900,7 @@ const HomePage = () => {
     current?.url,
     mutateProfiles,
     refreshAll,
+    syncExpiresAt,
     verifyCode,
   ])
 
@@ -1894,6 +1961,36 @@ const HomePage = () => {
     }
   }, [currentCode, running, sendClientPresence])
 
+  // 核心停止时不应发送“在线”心跳，但仍需让网站续费结果及时反映到客户端。
+  // 这里只读取轻量状态，不下载订阅；窗口重新获得焦点时立即同步，前台停留时最多等待一分钟。
+  useEffect(() => {
+    if (!currentCode || running) return
+
+    const syncAccountState = () => {
+      if (document.visibilityState === 'hidden' || updateInFlightRef.current) {
+        return
+      }
+      updateState(currentCode)
+        .then((state) => syncExpiresAt(state.expires_at))
+        .catch(() => undefined)
+    }
+    const syncWhenVisible = () => {
+      if (document.visibilityState === 'visible') syncAccountState()
+    }
+
+    const timer = window.setInterval(
+      syncAccountState,
+      ACCOUNT_STATE_SYNC_INTERVAL_MS,
+    )
+    window.addEventListener('focus', syncAccountState)
+    document.addEventListener('visibilitychange', syncWhenVisible)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', syncAccountState)
+      document.removeEventListener('visibilitychange', syncWhenVisible)
+    }
+  }, [currentCode, running, syncExpiresAt, updateState])
+
   useEffect(() => {
     trafficTotalsRef.current = {
       upload: connectionResponse.data?.uploadTotal ?? 0,
@@ -1935,17 +2032,34 @@ const HomePage = () => {
     }
   }, [currentCode, reportClientTraffic, running])
 
-  // 订阅更新轮询：只在「已连接 && 有提取码」时运行，避免空闲时持续打服务器。
-  // 单次请求加在途互斥；失败时指数退避并叠加随机抖动，防止 web 掉线恢复后所有客户端同时冲击。
+  // 每个客户端进程启动后刷新一次订阅；后续只在已连接时轻量检查服务端版本。
+  // 定时检查不会盲目下载整份订阅，失败时指数退避并叠加抖动，避免惊群。
   useEffect(() => {
-    if (!running || !currentCode) return
+    // 等当前配置真正加载完成后才消费“一次启动刷新”标记，避免启动时序较慢时漏刷。
+    if (!managedAuthReady || !currentCode || !current?.uid) return
+
+    let startupRefreshPending = false
+    if (!startupRefreshAttemptedRef.current) {
+      try {
+        startupRefreshPending =
+          sessionStorage.getItem(STARTUP_REFRESH_SESSION_KEY) !== 'done'
+        if (startupRefreshPending) {
+          sessionStorage.setItem(STARTUP_REFRESH_SESSION_KEY, 'done')
+        }
+      } catch {
+        // 极少数 WebView 禁用 sessionStorage 时仍依靠内存标记去重。
+        startupRefreshPending = true
+      }
+      startupRefreshAttemptedRef.current = true
+    }
+    if (!startupRefreshPending && !running) return
 
     let cancelled = false
     let timer: number | undefined
     let failures = 0
 
     // 返回 true 表示本轮网络请求成功（用于复位退避）。
-    const checkOnce = async (): Promise<boolean> => {
+    const checkOnce = async (refreshAtStartup: boolean): Promise<boolean> => {
       // 处于到期占位配置时，低频探测提取码是否已续费，成功则自动恢复正式订阅。
       if (onExpiredProfile()) {
         try {
@@ -1962,23 +2076,43 @@ const HomePage = () => {
         }
       }
 
+      let refreshReason: SubscriptionRefreshReason | null = null
       try {
         const state = await updateState(currentCode)
+        await syncExpiresAt(state.expires_at)
         const remoteVersion = Number(state.update_version || 0)
         const localVersion = Number(
           localStorage.getItem(CODE_UPDATE_VERSION_STORAGE_KEY) || 0,
         )
-        if (remoteVersion > localVersion && current?.uid) {
-          setStatus('检测到后台推送，正在更新订阅...')
-          const handled = await updateManagedProfile(remoteVersion)
-          if (!handled) await updateCurrentProfileKeepingRules()
+        refreshReason = planSubscriptionRefresh({
+          hasCurrentProfile: Boolean(current?.uid),
+          startupRefreshPending: refreshAtStartup,
+          remoteVersion,
+          localVersion,
+        })
+        if (refreshReason) {
+          setStatus(
+            refreshReason === 'startup'
+              ? '客户端已启动，正在刷新订阅...'
+              : '检测到后台推送，正在更新订阅...',
+          )
+          const result = await updateManagedProfile(remoteVersion, {
+            suppressValidationNotice: true,
+          })
+          if (result === 'unmanaged') {
+            await updateCurrentProfileKeepingRules(true)
+          }
           localStorage.setItem(
             CODE_UPDATE_VERSION_STORAGE_KEY,
-            String(remoteVersion),
+            String(Math.max(localVersion, remoteVersion)),
           )
-          await mutateProfiles()
-          await refreshAll()
-          setStatus('订阅已更新')
+          if (result !== 'managed-detached') {
+            await mutateProfiles()
+            await refreshAll()
+            setStatus(
+              refreshReason === 'startup' ? '启动订阅刷新完成' : '订阅已更新',
+            )
+          }
         }
         return true
       } catch (error) {
@@ -1995,12 +2129,18 @@ const HomePage = () => {
           setStatus('提取码已到期，请续费后重新使用')
           return true
         }
+        if (refreshReason) {
+          console.warn('自动订阅刷新失败，已继续使用原订阅', error)
+          setStatus('新订阅暂不可用，已继续使用原订阅')
+        } else if (refreshAtStartup) {
+          setStatus('启动订阅检查未完成，将在后台重试')
+        }
         // 纯网络错误：抛出以触发退避。
         throw error
       }
     }
 
-    const schedule = () => {
+    const schedule = (refreshAtStartup = false) => {
       if (cancelled) return
       const backoff = Math.min(
         UPDATE_POLL_BASE_MS * 2 ** failures,
@@ -2008,18 +2148,18 @@ const HomePage = () => {
       )
       // 50%~100% 抖动，打散客户端请求时间，避免惊群。
       const delay = backoff * (0.5 + Math.random() * 0.5)
-      timer = window.setTimeout(run, delay)
+      timer = window.setTimeout(() => run(refreshAtStartup), delay)
     }
 
-    const run = async () => {
+    const run = async (refreshAtStartup = false) => {
       if (cancelled) return
       if (updateInFlightRef.current) {
-        schedule()
+        if (running) schedule(refreshAtStartup)
         return
       }
       updateInFlightRef.current = true
       try {
-        await checkOnce()
+        await checkOnce(refreshAtStartup)
         failures = 0
       } catch {
         failures = Math.min(failures + 1, 4)
@@ -2028,10 +2168,14 @@ const HomePage = () => {
       } finally {
         updateInFlightRef.current = false
       }
-      schedule()
+      if (running) schedule()
     }
 
-    run()
+    if (startupRefreshPending) {
+      void run(true)
+    } else {
+      schedule()
+    }
     return () => {
       cancelled = true
       if (timer) window.clearTimeout(timer)
@@ -2040,12 +2184,14 @@ const HomePage = () => {
     activateExpiredProfile,
     current?.uid,
     expiresAt,
+    managedAuthReady,
     mutateProfiles,
     onExpiredProfile,
     recoverFromExpired,
     refreshAll,
     running,
     currentCode,
+    syncExpiresAt,
     updateCurrentProfileKeepingRules,
     updateManagedProfile,
     updateState,
@@ -2058,22 +2204,35 @@ const HomePage = () => {
     }
     setBusy(true)
     setStatus('正在更新订阅...')
+    if (updateInFlightRef.current) {
+      setStatus('订阅正在后台更新，请稍后再试')
+      setBusy(false)
+      return
+    }
+    updateInFlightRef.current = true
     try {
       const remoteVersion = Number(
         localStorage.getItem(CODE_UPDATE_VERSION_STORAGE_KEY) || 0,
       )
-      const handled = await updateManagedProfile(remoteVersion, true)
-      if (!handled) await updateCurrentProfileKeepingRules()
+      const result = await updateManagedProfile(remoteVersion, {
+        force: true,
+        suppressValidationNotice: true,
+      })
+      if (result === 'unmanaged') {
+        await updateCurrentProfileKeepingRules(true)
+      }
       await mutateProfiles()
       await refreshAll()
       setStatus(
-        handled
+        result === 'managed-updated'
           ? '受管订阅已重新获取；本地编辑已恢复远程管理'
           : '订阅已更新，同提取码规则已保留',
       )
-    } catch {
-      setStatus('订阅更新失败，请稍后重试')
+    } catch (error) {
+      console.warn('手动订阅更新失败，已继续使用原订阅', error)
+      setStatus('订阅更新失败，已继续使用原订阅')
     } finally {
+      updateInFlightRef.current = false
       setBusy(false)
     }
   })

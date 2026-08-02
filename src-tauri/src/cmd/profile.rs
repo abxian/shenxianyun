@@ -6,8 +6,7 @@ use crate::{
     config::{
         Config, IProfiles, PrfItem, PrfOption,
         profiles::{
-            profiles_delete_item_safe, profiles_patch_item_safe, profiles_reorder_safe,
-            profiles_save_file_safe,
+            profiles_delete_item_safe, profiles_patch_item_safe, profiles_reorder_safe, profiles_save_file_safe,
         },
         profiles_append_item_safe,
     },
@@ -150,8 +149,13 @@ pub async fn create_profile(item: PrfItem, file_data: Option<String>) -> CmdResu
 
 /// 更新配置文件
 #[tauri::command]
-pub async fn update_profile(index: String, option: Option<PrfOption>) -> CmdResult {
-    match feat::update_profile(&index, option.as_ref(), true, true, true).await {
+pub async fn update_profile(
+    index: String,
+    option: Option<PrfOption>,
+    suppress_failure_notice: Option<bool>,
+) -> CmdResult {
+    let notify_failure = !suppress_failure_notice.unwrap_or(false);
+    match feat::update_profile(&index, option.as_ref(), true, true, notify_failure).await {
         Ok(_) => Ok(()),
         Err(e) => {
             logging!(error, Type::Cmd, "{}", e);
@@ -244,12 +248,7 @@ async fn handle_success(
                 rollback_detail
             );
         }
-        return Err(
-            format!(
-                "配置已验证但无法保存订阅索引: {save_error}; {index_rollback}; {rollback_detail}"
-            )
-            .into(),
-        );
+        return Err(format!("配置已验证但无法保存订阅索引: {save_error}; {index_rollback}; {rollback_detail}").into());
     }
     profiles.apply();
     handle::Handle::refresh_clash();
