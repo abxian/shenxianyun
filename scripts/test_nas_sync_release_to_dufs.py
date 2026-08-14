@@ -170,6 +170,13 @@ class BuildPlanTests(unittest.TestCase):
             ],
         )
 
+    def test_asset_request_headers_resume_from_partial_size(self) -> None:
+        self.assertNotIn("Range", SYNC.asset_request_headers(0))
+        self.assertEqual(
+            SYNC.asset_request_headers(12_345)["Range"],
+            "bytes=12345-",
+        )
+
 
 class AtomicPublishTests(unittest.TestCase):
     def test_success_backs_up_previous_files(self) -> None:

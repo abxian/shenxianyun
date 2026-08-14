@@ -183,6 +183,13 @@ def candidate_download_urls(asset: dict[str, Any], mirror: str) -> list[str]:
     return urls
 
 
+def asset_request_headers(offset: int) -> dict[str, str]:
+    headers = request_headers(api=False)
+    if offset > 0:
+        headers["Range"] = f"bytes={offset}-"
+    return headers
+
+
 def download_asset(
     asset: dict[str, Any],
     target: Path,
@@ -193,28 +200,46 @@ def download_asset(
 ) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_name(target.name + ".part")
-    partial.unlink(missing_ok=True)
     last_error: Exception | None = None
+    expected_size = asset.get("size")
+    if not isinstance(expected_size, int) or expected_size <= 0:
+        raise SyncError(f"invalid GitHub size for {asset.get('name')}")
     candidates = candidate_download_urls(asset, download_mirror)
     for attempt in range(1, retries + 1):
         for url in candidates:
             try:
+                offset = partial.stat().st_size if partial.exists() else 0
+                if offset > expected_size:
+                    partial.unlink()
+                    offset = 0
                 host = urllib.parse.urlparse(url).netloc
                 print(
-                    f"[download {attempt}/{retries} via {host}] {asset['name']}",
+                    f"[download {attempt}/{retries} via {host} from {offset}] "
+                    f"{asset['name']}",
                     flush=True,
                 )
-                with open_url(url, api=False, timeout=timeout) as response:
-                    with partial.open("wb") as output:
+                request = urllib.request.Request(
+                    url,
+                    headers=asset_request_headers(offset),
+                )
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    resumed = offset > 0 and getattr(response, "status", None) == 206
+                    mode = "ab" if resumed else "wb"
+                    with partial.open(mode) as output:
                         shutil.copyfileobj(response, output, length=CHUNK_SIZE)
                         output.flush()
                         os.fsync(output.fileno())
+                actual_size = partial.stat().st_size
+                if actual_size < expected_size:
+                    raise SyncError(
+                        f"incomplete download for {asset['name']}: "
+                        f"{actual_size}/{expected_size}",
+                    )
                 verify_download(partial, asset)
                 os.replace(partial, target)
                 return
             except (OSError, urllib.error.URLError, SyncError) as exc:
                 last_error = exc
-                partial.unlink(missing_ok=True)
                 print(f"[download failed via {host}] {exc}", file=sys.stderr)
         if attempt < retries:
             time.sleep(min(2**attempt, 15))
