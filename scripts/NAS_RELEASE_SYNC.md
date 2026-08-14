@@ -23,11 +23,12 @@ NAS 使用 `nas-sync-release-to-dufs.py` 主动拉取正式资产，不再由 Ac
 `GITHUB_TOKEN`；如果 GitHub API 提示限流，可以仅在当前命令环境临时设置
 只读 token，不得写进脚本、Git 或日志。
 
-NAS 当前可访问 `api.github.com`，但直连 `github.com` 的 Release 文件可能
-超时。脚本默认先使用
-`https://gh-proxy.com/<GitHub 官方 Release URL>`，失败后再尝试 GitHub
-直连。无论下载来源如何，每个文件都必须通过 GitHub API 原始大小和
-SHA-256 digest 校验，否则不会发布。
+脚本默认使用 GitHub 官方 Release 直连并支持 Range 断点续传；连接中断后
+会从已有 `.part` 字节继续。只有排障时才显式传
+`--download-mirror https://gh-proxy.com`。无论下载来源如何，每个文件都必须
+通过 GitHub API 原始大小和 SHA-256 digest 校验，否则不会发布。GitHub API
+瞬时 TLS/网络错误会自动重试；401/403/404/422 会立即失败，避免掩盖认证、
+限流或版本错误。
 
 ## 使用
 
@@ -58,7 +59,12 @@ sudo python3 /vol1/1000/docker-projects/shenxianyun-release-sync/nas-sync-releas
 - 备份旧文件到
   `/vol1/1000/docker-projects/backups/shenxianyun-release-sync-<tag>-<时间>`；
 - 使用文件锁和原子替换，最后才切换 `update.json`；
+- API 瞬时错误自动重试，大文件中断后断点续传；
 - 中途失败自动恢复已经替换的文件。
+
+脚本**不会**合并分支、修改客户端版本、创建 tag 或生成 GitHub Release；
+这些动作必须先在 Git 完成并等待 `Release Build` 成功。脚本的唯一发布职责是：
+自动发现已经存在的最新正式 Release，校验资产，然后备份并替换 Dufs。
 
 只有明确需要回退时才可使用 `--allow-downgrade`，并应先在 NAS 笔记记录原因。
 
