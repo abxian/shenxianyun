@@ -343,8 +343,8 @@ def build_plan(
             single_asset(
                 release_assets,
                 label="Windows x64 installer",
-                predicate=lambda name: name.endswith("_x64-setup.exe")
-                and "fixed_webview2" not in name,
+                predicate=lambda name: name
+                == f"Clash.Verge_{version}_x64-setup.exe",
             ),
         ),
         (
@@ -352,8 +352,8 @@ def build_plan(
             single_asset(
                 release_assets,
                 label="Windows ARM64 installer",
-                predicate=lambda name: name.endswith("_arm64-setup.exe")
-                and "fixed_webview2" not in name,
+                predicate=lambda name: name
+                == f"Clash.Verge_{version}_arm64-setup.exe",
             ),
         ),
         (
@@ -361,7 +361,8 @@ def build_plan(
             single_asset(
                 release_assets,
                 label="macOS Apple Silicon DMG",
-                predicate=lambda name: name.endswith("_aarch64.dmg"),
+                predicate=lambda name: name
+                == f"Clash.Verge_{version}_aarch64.dmg",
             ),
         ),
         (
@@ -369,7 +370,8 @@ def build_plan(
             single_asset(
                 release_assets,
                 label="macOS Intel DMG",
-                predicate=lambda name: name.endswith("_x64.dmg"),
+                predicate=lambda name: name
+                == f"Clash.Verge_{version}_x64.dmg",
             ),
         ),
         (
@@ -377,7 +379,8 @@ def build_plan(
             single_asset(
                 release_assets,
                 label="Linux amd64 DEB",
-                predicate=lambda name: name.endswith("_amd64.deb"),
+                predicate=lambda name: name
+                == f"Clash.Verge_{version}_amd64.deb",
             ),
         ),
         (
@@ -385,7 +388,8 @@ def build_plan(
             single_asset(
                 release_assets,
                 label="Linux x86_64 RPM",
-                predicate=lambda name: name.endswith(".x86_64.rpm"),
+                predicate=lambda name: name
+                == f"Clash.Verge-{version}-1.x86_64.rpm",
             ),
         ),
     ]

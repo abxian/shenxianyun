@@ -112,6 +112,38 @@ class BuildPlanTests(unittest.TestCase):
             "v1.2.3-Clash.Verge.app.tar.gz",
         )
 
+    def test_build_plan_ignores_stale_assets_from_an_older_version(self) -> None:
+        stale_names = [
+            "Clash.Verge_1.2.2_x64-setup.exe",
+            "Clash.Verge_1.2.2_arm64-setup.exe",
+            "Clash.Verge_1.2.2_aarch64.dmg",
+            "Clash.Verge_1.2.2_x64.dmg",
+            "Clash.Verge_1.2.2_amd64.deb",
+            "Clash.Verge-1.2.2-1.x86_64.rpm",
+        ]
+        assets = dict(self.assets)
+        assets.update({name: fake_asset(name) for name in stale_names})
+
+        with tempfile.TemporaryDirectory() as temporary:
+            publish, _, _ = SYNC.build_plan(
+                tag="v1.2.3",
+                release_assets=assets,
+                update_data=self.update_data,
+                public_base="https://downloads.example/sxy",
+                staging=Path(temporary),
+            )
+
+        aliases = {
+            str(item.relative_target): item.source_asset
+            for item in publish
+            if not str(item.relative_target).startswith("updater/")
+        }
+        self.assertEqual(
+            aliases["神仙云.exe"],
+            "Clash.Verge_1.2.3_x64-setup.exe",
+        )
+        self.assertTrue(all("1.2.2" not in name for name in aliases.values()))
+
     def test_build_plan_rejects_missing_intel_platforms(self) -> None:
         update_data = json.loads(json.dumps(self.update_data))
         del update_data["platforms"]["darwin-intel"]
