@@ -133,12 +133,27 @@ def open_url(url: str, *, api: bool, timeout: int):
     return urllib.request.urlopen(request, timeout=timeout)
 
 
-def fetch_json(url: str, *, timeout: int) -> dict[str, Any]:
-    try:
-        with open_url(url, api=True, timeout=timeout) as response:
-            return json.load(response)
-    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
-        raise SyncError(f"failed to read GitHub API {url}: {exc}") from exc
+def fetch_json(url: str, *, timeout: int, retries: int) -> dict[str, Any]:
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            with open_url(url, api=True, timeout=timeout) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code in {401, 403, 404, 422}:
+                break
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            last_error = exc
+        if attempt < retries:
+            delay = min(2**attempt, 15)
+            print(
+                f"[GitHub API retry {attempt}/{retries} in {delay}s] "
+                f"{last_error}",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+    raise SyncError(f"failed to read GitHub API {url}: {last_error}") from last_error
 
 
 def expected_sha256(asset: dict[str, Any]) -> str:
@@ -578,7 +593,11 @@ def main() -> int:
         f"{API_ROOT}/repos/{REPOSITORY}/releases/tags/{args.tag}"
         if args.tag else f"{API_ROOT}/repos/{REPOSITORY}/releases/latest"
     )
-    release = fetch_json(release_url, timeout=args.timeout)
+    release = fetch_json(
+        release_url,
+        timeout=args.timeout,
+        retries=args.retries,
+    )
     tag = args.tag or str(release.get("tag_name") or "")
     if not STABLE_TAG_RE.fullmatch(tag):
         raise SyncError("GitHub latest is not a stable vX.Y.Z release")
@@ -591,6 +610,7 @@ def main() -> int:
     updater_release = fetch_json(
         f"{API_ROOT}/repos/{REPOSITORY}/releases/tags/updater",
         timeout=args.timeout,
+        retries=args.retries,
     )
     updater_assets = index_assets(updater_release)
     updater_asset = updater_assets.get("update.json")

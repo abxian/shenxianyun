@@ -7,7 +7,9 @@ import json
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT_PATH = Path(__file__).with_name("nas-sync-release-to-dufs.py")
@@ -176,6 +178,22 @@ class BuildPlanTests(unittest.TestCase):
             SYNC.asset_request_headers(12_345)["Range"],
             "bytes=12345-",
         )
+
+    def test_fetch_json_retries_transient_network_failure(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"tag_name":"v1.2.3"}'
+        with mock.patch.object(
+            SYNC,
+            "open_url",
+            side_effect=[urllib.error.URLError("temporary"), response],
+        ), mock.patch.object(SYNC.time, "sleep"):
+            result = SYNC.fetch_json(
+                "https://api.github.example/latest",
+                timeout=5,
+                retries=2,
+            )
+        self.assertEqual(result["tag_name"], "v1.2.3")
 
 
 class AtomicPublishTests(unittest.TestCase):
