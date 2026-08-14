@@ -35,16 +35,17 @@ SHA-256 digest 校验，否则不会发布。
 
 ```bash
 sudo python3 /vol1/1000/docker-projects/shenxianyun-release-sync/nas-sync-release-to-dufs.py \
-  --tag v2.5.29 \
   --dry-run
 ```
 
 dry-run 成功后正式同步：
 
 ```bash
-sudo python3 /vol1/1000/docker-projects/shenxianyun-release-sync/nas-sync-release-to-dufs.py \
-  --tag v2.5.29
+sudo python3 /vol1/1000/docker-projects/shenxianyun-release-sync/nas-sync-release-to-dufs.py
 ```
+
+省略 `--tag` 时，脚本只选择 GitHub `latest` 指向的最新正式稳定版，不会
+选择 draft 或 prerelease。排障或明确回退时仍可显式传入 `--tag vX.Y.Z`。
 
 脚本会完成：
 

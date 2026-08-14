@@ -54,7 +54,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Pull and atomically publish a Shenxianyun Release to Dufs.",
     )
-    parser.add_argument("--tag", required=True, help="Stable tag, for example v2.5.29")
+    parser.add_argument(
+        "--tag",
+        help="Stable tag, for example v2.5.29; omitted means GitHub latest stable release",
+    )
     parser.add_argument(
         "--dufs-root",
         type=Path,
@@ -537,16 +540,20 @@ def publish_atomically(
 
 def main() -> int:
     args = parse_args()
-    if not STABLE_TAG_RE.fullmatch(args.tag):
+    if args.tag and not STABLE_TAG_RE.fullmatch(args.tag):
         raise SyncError("--tag must be a stable vX.Y.Z tag")
     if args.retries < 1 or args.timeout < 1:
         raise SyncError("--retries and --timeout must be positive")
 
-    release = fetch_json(
-        f"{API_ROOT}/repos/{REPOSITORY}/releases/tags/{args.tag}",
-        timeout=args.timeout,
+    release_url = (
+        f"{API_ROOT}/repos/{REPOSITORY}/releases/tags/{args.tag}"
+        if args.tag else f"{API_ROOT}/repos/{REPOSITORY}/releases/latest"
     )
-    if release.get("tag_name") != args.tag:
+    release = fetch_json(release_url, timeout=args.timeout)
+    tag = args.tag or str(release.get("tag_name") or "")
+    if not STABLE_TAG_RE.fullmatch(tag):
+        raise SyncError("GitHub latest is not a stable vX.Y.Z release")
+    if release.get("tag_name") != tag:
         raise SyncError("GitHub returned a different release tag")
     if release.get("draft") or release.get("prerelease"):
         raise SyncError("only a published, non-prerelease Release may be synchronized")
@@ -574,7 +581,7 @@ def main() -> int:
     current = current_version(args.dufs_root)
     if (
         current is not None
-        and version_tuple(current) > version_tuple(args.tag)
+        and version_tuple(current) > version_tuple(tag)
         and not args.allow_downgrade
     ):
         raise SyncError(
@@ -582,9 +589,9 @@ def main() -> int:
         )
 
     staging_parent = args.work_root
-    staging = staging_parent / f"{args.tag}-{os.getpid()}"
+    staging = staging_parent / f"{tag}-{os.getpid()}"
     publish_files, rewritten_update, needed_assets = build_plan(
-        tag=args.tag,
+        tag=tag,
         release_assets=release_assets,
         update_data=update_data,
         public_base=args.public_base,
@@ -592,7 +599,7 @@ def main() -> int:
     )
 
     print(f"Repository: {REPOSITORY}")
-    print(f"Release: {args.tag}")
+    print(f"Release: {tag}")
     print(f"Current Dufs version: {current or 'none'}")
     print(f"Dufs root: {args.dufs_root}")
     print("Assets:")
@@ -630,12 +637,12 @@ def main() -> int:
             backup_dir = publish_atomically(
                 dufs_root=args.dufs_root,
                 backup_root=args.backup_root,
-                tag=args.tag,
+                tag=tag,
                 staging=staging,
                 publish_files=publish_files,
                 update_data=rewritten_update,
             )
-            print(f"SUCCESS: {args.tag} published; backup: {backup_dir}")
+            print(f"SUCCESS: {tag} published; backup: {backup_dir}")
     finally:
         shutil.rmtree(staging, ignore_errors=True)
         try:

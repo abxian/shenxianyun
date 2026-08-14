@@ -30,6 +30,14 @@ def fake_asset(name: str) -> dict[str, object]:
 
 
 class BuildPlanTests(unittest.TestCase):
+    def test_tag_is_optional_for_latest_stable_release(self) -> None:
+        previous = sys.argv
+        try:
+            sys.argv = [str(SCRIPT_PATH)]
+            self.assertIsNone(SYNC.parse_args().tag)
+        finally:
+            sys.argv = previous
+
     def setUp(self) -> None:
         names = [
             "Clash.Verge_1.2.3_x64-setup.exe",
