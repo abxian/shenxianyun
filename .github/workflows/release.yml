@@ -30,13 +30,14 @@ jobs:
 
       - name: Check if tag is from main branch
         run: |
+          set -euo pipefail
           TAG_REF="${GITHUB_REF##*/}"
           echo "Checking if tag $TAG_REF is from main branch..."
 
-          TAG_COMMIT=$(git rev-list -n 1 $TAG_REF)
-          MAIN_COMMITS=$(git rev-list origin/main)
+          git fetch origin main
+          TAG_COMMIT=$(git rev-list -n 1 "$TAG_REF")
 
-          if echo "$MAIN_COMMITS" | grep -q "$TAG_COMMIT"; then
+          if git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
             echo "✅ Tag $TAG_REF is from main branch"
           else
             echo "❌ Tag $TAG_REF is not from main branch"
@@ -83,7 +84,8 @@ jobs:
           echo "TAG_NAME=$TAG_REF" >> $GITHUB_ENV
           VERSION=$(echo "$TAG_REF" | sed 's/^v//')
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "DOWNLOAD_URL=https://github.com/clash-verge-rev/clash-verge-rev/releases/download/$TAG_REF" >> $GITHUB_ENV
+          echo "DOWNLOAD_URL=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/$TAG_REF" >> $GITHUB_ENV
+          echo "REPOSITORY_URL=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" >> $GITHUB_ENV
         shell: bash
 
       - run: |
@@ -117,10 +119,7 @@ jobs:
           - [64位](${{ env.DOWNLOAD_URL }}/Clash.Verge-${{ env.VERSION }}-1.x86_64.rpm) | [ARM64](${{ env.DOWNLOAD_URL }}/Clash.Verge-${{ env.VERSION }}-1.aarch64.rpm) | [ARMv7](${{ env.DOWNLOAD_URL }}/Clash.Verge-${{ env.VERSION }}-1.armhfp.rpm)
 
           ### FAQ
-          - [常见问题](https://clash-verge-rev.github.io/faq/windows.html)
-
-          ### 稳定机场VPN推荐
-          - [狗狗加速](https://verge.dginv.click/#/register?code=oaxsAGo6)
+          - [使用说明与问题反馈](${{ env.REPOSITORY_URL }}/issues)
 
           Created at ${{ env.BUILDTIME }}.
           EOF
@@ -148,7 +147,7 @@ jobs:
           echo "Publishing release $release_id ($release_url) with $asset_count assets."
 
           gh api --method PATCH repos/{owner}/{repo}/releases/"$release_id" \
-            -f name="Clash Verge Rev $TAG_NAME" \
+            -f name="神仙云 PC $TAG_NAME" \
             -F body=@release.txt \
             -F draft=false \
             -F prerelease="$PRERELEASE" \
@@ -267,7 +266,7 @@ jobs:
           # build an unsigned .dmg instead of failing the whole release.
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'Clash Verge Rev ${{ github.ref_name }}'
+          releaseName: '神仙云 PC ${{ github.ref_name }}'
           releaseBody: 'Draft release, will be updated later.'
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-rc') }}
@@ -433,7 +432,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{env.VERSION}}
-          name: 'Clash Verge Rev v${{env.VERSION}}'
+          name: '神仙云 PC v${{env.VERSION}}'
           body: 'See release notes for detailed changelog.'
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
@@ -550,7 +549,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{steps.build.outputs.appVersion}}
-          name: 'Clash Verge Rev v${{steps.build.outputs.appVersion}}'
+          name: '神仙云 PC v${{steps.build.outputs.appVersion}}'
           body: 'See release notes for detailed changelog.'
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true

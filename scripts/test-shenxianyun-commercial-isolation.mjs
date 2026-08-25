@@ -77,3 +77,28 @@ test('keeps stable device identity local and sends only the derived key', () => 
   assert.match(homeSource, /device_key:\s*deviceKey\s*\|\|\s*getClientId\(\)/)
   assert.doesNotMatch(homeSource, /MachineGuid|IOPlatformUUID|machine-id/)
 })
+
+test('keeps the stable release page and updater publication on Shenxianyun', () => {
+  const releaseWorkflow = read('.github/workflows/release.yml')
+  const updaterSource = read('scripts/updater.mjs')
+  const fixedUpdaterSource = read('scripts/updater-fixed-webview2.mjs')
+
+  assert.match(releaseWorkflow, /git merge-base --is-ancestor/)
+  assert.match(
+    releaseWorkflow,
+    /DOWNLOAD_URL=\$\{GITHUB_SERVER_URL\}\/\$\{GITHUB_REPOSITORY\}/,
+  )
+  assert.match(releaseWorkflow, /神仙云 PC \$TAG_NAME/)
+  assert.match(releaseWorkflow, /releaseName: '神仙云 PC/)
+  assert.match(releaseWorkflow, /ENABLE_DUFS_PUBLISH: 'false'/)
+  assert.doesNotMatch(
+    releaseWorkflow,
+    /clash-verge-rev\/clash-verge-rev|verge\.dginv\.click|吾爱云|52nm\.cn/i,
+  )
+  assert.match(updaterSource, /process\.env\.ENABLE_DUFS_PUBLISH === 'true'/)
+  assert.match(
+    fixedUpdaterSource,
+    /fixed WebView2 updater is incomplete for \$\{key\}/,
+  )
+  assert.match(fixedUpdaterSource, /process\.exitCode = 1/)
+})
