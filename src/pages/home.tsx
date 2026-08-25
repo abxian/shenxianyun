@@ -80,6 +80,7 @@ import {
   factoryResetApp,
   getProfiles,
   getServiceDiagnostics,
+  getStableDeviceKey,
   getSystemProxy,
   importProfile,
   installService,
@@ -127,6 +128,16 @@ import {
   parseManagedTrafficCounter,
   type ManagedTrafficCounter,
 } from '@/services/managed-traffic-counter'
+import {
+  parseManagedTrafficDiagnostic,
+  reduceManagedTrafficDiagnostic,
+} from '@/services/managed-traffic-diagnostics'
+import {
+  createManagedTrafficScheduler,
+  ManagedTrafficReportError,
+  type ManagedTrafficReportOutcome,
+  type ManagedTrafficSchedulerTransition,
+} from '@/services/managed-traffic-scheduler'
 import getSystem from '@/utils/get-system'
 import {
   planSubscriptionRefresh,
@@ -140,6 +151,8 @@ const STARTUP_REFRESH_SESSION_KEY = 'shenxianyun.startupSubscriptionRefresh.v1'
 const CLIENT_ID_STORAGE_KEY = 'shenxianyun.clientId'
 const PENDING_PRESENCE_STORAGE_KEY = 'shenxianyun.pendingPresence.v1'
 const MANAGED_TRAFFIC_STORAGE_KEY = 'shenxianyun.managedTraffic.v1'
+const MANAGED_TRAFFIC_DIAGNOSTIC_STORAGE_KEY =
+  'shenxianyun.managedTrafficStatus.v1'
 // 到期占位配置的本地 UID，续费恢复后用它定位并删除占位配置。
 const EXPIRED_PROFILE_UID_KEY = 'shenxianyun.expiredProfileUid'
 // 「提取码订阅」对应的配置 UID。切码/恢复时只替换这一张，保留用户手动导入/新建的其它配置。
@@ -149,10 +162,6 @@ const DELAY_TIMEOUT = 5000
 const HEARTBEAT_INTERVAL_MS = 120_000
 const HEARTBEAT_JITTER_MS = 20_000
 const ACCOUNT_STATE_SYNC_INTERVAL_MS = 60_000
-// 累计计数器会持久化，因此无需高频写入；五分钟基础间隔叠加抖动，避免客户端同时惊群。
-const TRAFFIC_REPORT_INTERVAL_MS = 300_000
-const TRAFFIC_REPORT_JITTER_MS = 60_000
-const TRAFFIC_REPORT_MAX_BACKOFF_MS = 1_800_000
 const MAX_TRAFFIC_REPORT_DELTA = 5 * 1024 * 1024 * 1024
 // 订阅更新轮询：仅在已连接时运行，基础间隔 10 分钟，失败时指数退避到最多 1 小时。
 const UPDATE_POLL_BASE_MS = 600_000
@@ -199,6 +208,41 @@ const clearPendingPresence = (id: string) => {
 
 const heartbeatDelay = () =>
   HEARTBEAT_INTERVAL_MS + Math.floor(Math.random() * HEARTBEAT_JITTER_MS)
+
+const persistManagedTrafficDiagnostic = (
+  transition: ManagedTrafficSchedulerTransition,
+) => {
+  try {
+    const previous = parseManagedTrafficDiagnostic(
+      localStorage.getItem(MANAGED_TRAFFIC_DIAGNOSTIC_STORAGE_KEY),
+    )
+    localStorage.setItem(
+      MANAGED_TRAFFIC_DIAGNOSTIC_STORAGE_KEY,
+      JSON.stringify(reduceManagedTrafficDiagnostic(previous, transition)),
+    )
+  } catch {
+    // 诊断状态是可选证据；存储不可用时不得影响真实流量上报。
+  }
+}
+
+const managedTrafficResponseError = (status: number, code?: string) => {
+  if (code === 'traffic_limit') {
+    return new ManagedTrafficReportError('traffic_limit', status)
+  }
+  if (status === 401 || status === 403) {
+    return new ManagedTrafficReportError('authentication', status)
+  }
+  if (status === 429) {
+    return new ManagedTrafficReportError('rate_limited', status)
+  }
+  if (status === 503) {
+    return new ManagedTrafficReportError('service_unavailable', status)
+  }
+  if (status >= 400) {
+    return new ManagedTrafficReportError('http', status)
+  }
+  return new ManagedTrafficReportError('server_rejected', status)
+}
 
 const formatUsageBytes = (value: number) => {
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -863,14 +907,19 @@ const HomePage = () => {
   const [nowMs, setNowMs] = useState(() => Date.now())
   const trafficTotalsRef = useRef({ upload: 0, download: 0 })
   const lastReportedTrafficRef = useRef({ upload: 0, download: 0 })
-  const trafficReportInFlightRef = useRef(false)
   const trafficReportRetryAfterRef = useRef(0)
   const trafficCounterRef = useRef<ManagedTrafficCounter | null>(null)
+  const trafficSchedulerRef = useRef<ReturnType<
+    typeof createManagedTrafficScheduler
+  > | null>(null)
   const pendingManagedTrafficRef = useRef<
     ReturnType<typeof managedTrafficPayload> | undefined
   >(undefined)
   const sendClientPresenceRef = useRef<
     ((online: boolean) => Promise<void>) | null
+  >(null)
+  const reportClientTrafficRef = useRef<
+    ((signal: AbortSignal) => Promise<ManagedTrafficReportOutcome>) | null
   >(null)
   const managedAuthRef = useRef<ManagedAuth | null>(null)
   // eslint-disable-next-line @eslint-react/no-unused-state -- readiness is consumed by the subscription lifecycle effect, not JSX.
@@ -981,6 +1030,7 @@ const HomePage = () => {
       try {
         return await fetchWithVerifiedTls(url, init)
       } catch (err) {
+        if (init?.signal?.aborted) throw err
         // 国内主域名必须直连；失败后由上层自动换线路，不允许绕代理重试。
         if (isDomesticApiUrl(url)) throw err
         // 第 2 层：内核混合端口（在跑时）或系统代理
@@ -991,7 +1041,8 @@ const HomePage = () => {
               ...init,
               proxy: { all: p },
             })
-          } catch {
+          } catch (proxyError) {
+            if (init?.signal?.aborted) throw proxyError
             // 落到第 3 层
           }
         }
@@ -1064,6 +1115,7 @@ const HomePage = () => {
 
   const exchangeImportTicket = useCallback(
     async (request: ManagedImportRequest) => {
+      const deviceKey = await getStableDeviceKey().catch(() => null)
       const response = await apiFetch(
         `${request.apiBase}/api/import/exchange`,
         {
@@ -1078,6 +1130,7 @@ const HomePage = () => {
           body: JSON.stringify({
             ticket: request.ticket,
             client_id: getClientId(),
+            device_key: deviceKey || getClientId(),
             platform: DESKTOP_PLATFORM,
           }),
         },
@@ -1667,154 +1720,199 @@ const HomePage = () => {
     sendClientPresenceRef.current = sendClientPresence
   }, [sendClientPresence])
 
-  const reportClientTraffic = useCallback(async () => {
-    const value = currentCode
-    if (!value || !running) return
+  const reportClientTraffic = useCallback(
+    async (signal: AbortSignal): Promise<ManagedTrafficReportOutcome> => {
+      const value = currentCode
+      if (!value || !running) return { status: 'inactive' }
 
-    const current = trafficTotalsRef.current
-    const auth = managedAuthRef.current
-    if (auth?.accessCode === value) {
-      let counter =
-        trafficCounterRef.current || createManagedTrafficCounter(value, current)
-      const coreCounterReset =
-        current.upload < counter.observed.upload ||
-        current.download < counter.observed.download
-      if (!coreCounterReset) {
-        counter = observeManagedTraffic(counter, current).counter
+      const current = trafficTotalsRef.current
+      const auth = managedAuthRef.current
+      if (auth?.accessCode === value) {
+        let counter =
+          trafficCounterRef.current ||
+          createManagedTrafficCounter(value, current)
+        const coreCounterReset =
+          current.upload < counter.observed.upload ||
+          current.download < counter.observed.download
+        if (!coreCounterReset) {
+          counter = observeManagedTraffic(counter, current).counter
+        }
+        trafficCounterRef.current = counter
+        localStorage.setItem(
+          MANAGED_TRAFFIC_STORAGE_KEY,
+          JSON.stringify(counter),
+        )
+        const pending =
+          pendingManagedTrafficRef.current || managedTrafficPayload(counter)
+        if (pending.upload_total <= 0 && pending.download_total <= 0) {
+          return { status: 'no_delta' }
+        }
+        pendingManagedTrafficRef.current = pending
+
+        trafficReportRetryAfterRef.current = 0
+        const response = await apiFetch(
+          `${auth.apiBase}/api/v2/client/traffic`,
+          {
+            method: 'POST',
+            connectTimeout: 5000,
+            signal,
+            headers: {
+              Authorization: `Bearer ${auth.deviceToken}`,
+              'Content-Type': 'application/json',
+              'User-Agent': CLIENT_UA,
+              'X-Client-Id': getClientId(),
+              'X-Client-Type': 'shenxianyun-windows',
+            },
+            body: JSON.stringify({
+              ...pending,
+              platform: 'Windows电脑',
+              app_name: '神仙云桌面端',
+              app_version: DESKTOP_VERSION,
+              device_name: navigator.userAgent,
+            }),
+          },
+        )
+        const data = (await response.json().catch((error) => {
+          if (signal.aborted) throw error
+          return null
+        })) as {
+          ok?: boolean
+          duplicate?: boolean
+          code?: string
+          message?: string
+          day_used?: number
+          month_used?: number
+          day_limit?: number
+          month_limit?: number
+        } | null
+        if (signal.aborted) throw new ManagedTrafficReportError('timeout')
+        if (response.status === 429 || response.status === 503) {
+          const retryAfterSeconds = Number(response.headers.get('Retry-After'))
+          trafficReportRetryAfterRef.current = Number.isFinite(
+            retryAfterSeconds,
+          )
+            ? Math.max(0, retryAfterSeconds * 1000)
+            : 0
+        }
+        if (response.status === 409 && data?.code === 'counter_reset') {
+          const reset = createManagedTrafficCounter(value, current)
+          trafficCounterRef.current = reset
+          pendingManagedTrafficRef.current = undefined
+          localStorage.setItem(
+            MANAGED_TRAFFIC_STORAGE_KEY,
+            JSON.stringify(reset),
+          )
+          return { status: 'counter_rebased', sequence: reset.sequence }
+        }
+        if (!response.ok || !data?.ok) {
+          if (data?.code === 'traffic_limit') {
+            pendingManagedTrafficRef.current = undefined
+            await stopForServerLimit(
+              data.message || '流量额度已用尽，代理已停止',
+            )
+          }
+          throw managedTrafficResponseError(response.status, data?.code)
+        }
+        const latestCounter = trafficCounterRef.current || counter
+        const acknowledged = coreCounterReset
+          ? createManagedTrafficCounter(value, current)
+          : acknowledgeManagedTraffic(latestCounter, pending.sequence)
+        trafficCounterRef.current = acknowledged
+        pendingManagedTrafficRef.current = undefined
+        localStorage.setItem(
+          MANAGED_TRAFFIC_STORAGE_KEY,
+          JSON.stringify(acknowledged),
+        )
+        if (data) {
+          setClientAccountState((previous) => ({
+            dayUsed: Number(data.day_used) || 0,
+            monthUsed: Number(data.month_used) || 0,
+            dayLimit: Number(data.day_limit) || 0,
+            monthLimit: Number(data.month_limit) || 0,
+            onlineDevices: previous?.onlineDevices || 0,
+            onlineLimit: previous?.onlineLimit || 0,
+            boundDevices: previous?.boundDevices || 0,
+            boundLimit: previous?.boundLimit || 0,
+            showUsage: previous?.showUsage === true,
+            updatedAt: Date.now(),
+          }))
+        }
+        return { status: 'acknowledged', sequence: acknowledged.sequence }
       }
-      trafficCounterRef.current = counter
-      localStorage.setItem(MANAGED_TRAFFIC_STORAGE_KEY, JSON.stringify(counter))
-      const pending =
-        pendingManagedTrafficRef.current || managedTrafficPayload(counter)
-      if (pending.upload_total <= 0 && pending.download_total <= 0) return
-      pendingManagedTrafficRef.current = pending
+      const previous = lastReportedTrafficRef.current
+      if (
+        current.upload < previous.upload ||
+        current.download < previous.download
+      ) {
+        lastReportedTrafficRef.current = current
+        return { status: 'counter_rebased' }
+      }
 
-      const response = await apiFetch(`${auth.apiBase}/api/v2/client/traffic`, {
-        method: 'POST',
-        connectTimeout: 5000,
-        headers: {
-          Authorization: `Bearer ${auth.deviceToken}`,
-          'Content-Type': 'application/json',
-          'User-Agent': CLIENT_UA,
-          'X-Client-Id': getClientId(),
-          'X-Client-Type': 'shenxianyun-windows',
+      const uploadDelta = current.upload - previous.upload
+      const downloadDelta = current.download - previous.download
+      if (uploadDelta <= 0 && downloadDelta <= 0) {
+        return { status: 'no_delta' }
+      }
+      if (
+        uploadDelta > MAX_TRAFFIC_REPORT_DELTA ||
+        downloadDelta > MAX_TRAFFIC_REPORT_DELTA
+      ) {
+        lastReportedTrafficRef.current = current
+        return { status: 'invalid_delta_discarded' }
+      }
+
+      trafficReportRetryAfterRef.current = 0
+      const response = await apiFetch(
+        `${getApiBase()}/api/client/traffic/${encodeURIComponent(value)}`,
+        {
+          method: 'POST',
+          connectTimeout: 5000,
+          signal,
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': CLIENT_UA,
+            'X-Client-Id': getClientId(),
+            'X-Client-Type': 'shenxianyun-windows',
+          },
+          body: JSON.stringify({
+            client_id: getClientId(),
+            platform: 'Windows电脑',
+            app_name: '神仙云桌面端',
+            app_version: DESKTOP_VERSION,
+            device_name: navigator.userAgent,
+            upload_bytes: uploadDelta,
+            download_bytes: downloadDelta,
+          }),
         },
-        body: JSON.stringify({
-          ...pending,
-          platform: 'Windows电脑',
-          app_name: '神仙云桌面端',
-          app_version: DESKTOP_VERSION,
-          device_name: navigator.userAgent,
-        }),
-      })
-      const data = (await response.json().catch(() => null)) as {
+      )
+      const data = (await response.json().catch((error) => {
+        if (signal.aborted) throw error
+        return null
+      })) as {
         ok?: boolean
-        duplicate?: boolean
         code?: string
         message?: string
-        day_used?: number
-        month_used?: number
-        day_limit?: number
-        month_limit?: number
       } | null
+      if (signal.aborted) throw new ManagedTrafficReportError('timeout')
       if (response.status === 429 || response.status === 503) {
         const retryAfterSeconds = Number(response.headers.get('Retry-After'))
         trafficReportRetryAfterRef.current = Number.isFinite(retryAfterSeconds)
           ? Math.max(0, retryAfterSeconds * 1000)
           : 0
       }
-      if (response.status === 409 && data?.code === 'counter_reset') {
-        const reset = createManagedTrafficCounter(value, current)
-        trafficCounterRef.current = reset
-        pendingManagedTrafficRef.current = undefined
-        localStorage.setItem(MANAGED_TRAFFIC_STORAGE_KEY, JSON.stringify(reset))
-        return
-      }
       if (!response.ok || !data?.ok) {
-        if (data?.code === 'traffic_limit') {
-          pendingManagedTrafficRef.current = undefined
-          await stopForServerLimit(data.message || '流量额度已用尽，代理已停止')
-        }
-        throw new Error(data?.message || '客户端流量上报失败')
+        throw managedTrafficResponseError(response.status, data?.code)
       }
-      const latestCounter = trafficCounterRef.current || counter
-      const acknowledged = coreCounterReset
-        ? createManagedTrafficCounter(value, current)
-        : acknowledgeManagedTraffic(latestCounter, pending.sequence)
-      trafficCounterRef.current = acknowledged
-      pendingManagedTrafficRef.current = undefined
-      localStorage.setItem(
-        MANAGED_TRAFFIC_STORAGE_KEY,
-        JSON.stringify(acknowledged),
-      )
-      if (data) {
-        setClientAccountState((previous) => ({
-          dayUsed: Number(data.day_used) || 0,
-          monthUsed: Number(data.month_used) || 0,
-          dayLimit: Number(data.day_limit) || 0,
-          monthLimit: Number(data.month_limit) || 0,
-          onlineDevices: previous?.onlineDevices || 0,
-          onlineLimit: previous?.onlineLimit || 0,
-          boundDevices: previous?.boundDevices || 0,
-          boundLimit: previous?.boundLimit || 0,
-          showUsage: previous?.showUsage === true,
-          updatedAt: Date.now(),
-        }))
-      }
-      return
-    }
-    const previous = lastReportedTrafficRef.current
-    if (
-      current.upload < previous.upload ||
-      current.download < previous.download
-    ) {
+      // 只有服务端明确确认成功才推进基线，失败增量留到下一轮重试。
       lastReportedTrafficRef.current = current
-      return
-    }
+      return { status: 'acknowledged' }
+    },
+    [apiFetch, currentCode, running, stopForServerLimit],
+  )
 
-    const uploadDelta = current.upload - previous.upload
-    const downloadDelta = current.download - previous.download
-    if (uploadDelta <= 0 && downloadDelta <= 0) return
-    if (
-      uploadDelta > MAX_TRAFFIC_REPORT_DELTA ||
-      downloadDelta > MAX_TRAFFIC_REPORT_DELTA
-    ) {
-      lastReportedTrafficRef.current = current
-      return
-    }
-
-    const response = await apiFetch(
-      `${getApiBase()}/api/client/traffic/${encodeURIComponent(value)}`,
-      {
-        method: 'POST',
-        connectTimeout: 5000,
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': CLIENT_UA,
-          'X-Client-Id': getClientId(),
-          'X-Client-Type': 'shenxianyun-windows',
-        },
-        body: JSON.stringify({
-          client_id: getClientId(),
-          platform: 'Windows电脑',
-          app_name: '神仙云桌面端',
-          app_version: DESKTOP_VERSION,
-          device_name: navigator.userAgent,
-          upload_bytes: uploadDelta,
-          download_bytes: downloadDelta,
-        }),
-      },
-    )
-    const data = (await response.json().catch(() => null)) as {
-      ok?: boolean
-      message?: string
-    } | null
-    if (!response.ok || !data?.ok) {
-      throw new Error(data?.message || '客户端流量上报失败')
-    }
-    // 只有服务端明确确认成功才推进基线，失败增量留到下一轮重试。
-    lastReportedTrafficRef.current = current
-  }, [apiFetch, currentCode, running, stopForServerLimit])
+  useEffect(() => {
+    reportClientTrafficRef.current = reportClientTraffic
+  }, [reportClientTraffic])
 
   const activateCode = async (
     value: string,
@@ -2125,30 +2223,12 @@ const HomePage = () => {
   }, [currentCode, running, syncExpiresAt, updateState])
 
   useEffect(() => {
-    trafficTotalsRef.current = {
-      upload: connectionResponse.data?.uploadTotal ?? 0,
-      download: connectionResponse.data?.downloadTotal ?? 0,
-    }
-    const counter = trafficCounterRef.current
-    if (!counter) return
-    const observed = observeManagedTraffic(counter, trafficTotalsRef.current)
-    // 核心累计值回退通常表示核心重启。旧累计值必须先成功补报，不能被新基线覆盖。
-    if (observed.reset) return
-    trafficCounterRef.current = observed.counter
-    localStorage.setItem(
-      MANAGED_TRAFFIC_STORAGE_KEY,
-      JSON.stringify(observed.counter),
-    )
-  }, [
-    connectionResponse.data?.downloadTotal,
-    connectionResponse.data?.uploadTotal,
-  ])
-
-  useEffect(() => {
-    if (!running || !currentCode) {
-      lastReportedTrafficRef.current = trafficTotalsRef.current
+    if (!managedAuthReady || !currentCode) {
+      trafficCounterRef.current = null
+      pendingManagedTrafficRef.current = undefined
       return
     }
+    if (trafficCounterRef.current?.accessCode === currentCode) return
 
     const restored = parseManagedTrafficCounter(
       localStorage.getItem(MANAGED_TRAFFIC_STORAGE_KEY),
@@ -2160,54 +2240,71 @@ const HomePage = () => {
     trafficCounterRef.current = counter
     pendingManagedTrafficRef.current = undefined
     localStorage.setItem(MANAGED_TRAFFIC_STORAGE_KEY, JSON.stringify(counter))
+  }, [currentCode, managedAuthReady])
 
-    let cancelled = false
-    let timer: number | undefined
-    let failures = 0
-
-    const schedule = (delay: number) => {
-      timer = window.setTimeout(run, delay)
+  useEffect(() => {
+    const totals = {
+      upload: connectionResponse.data?.uploadTotal ?? 0,
+      download: connectionResponse.data?.downloadTotal ?? 0,
     }
-    const run = async () => {
-      if (cancelled) return
-      if (trafficReportInFlightRef.current) {
-        schedule(TRAFFIC_REPORT_INTERVAL_MS)
-        return
-      }
-      trafficReportInFlightRef.current = true
-      try {
-        await reportClientTraffic()
-        failures = 0
+    trafficTotalsRef.current = totals
+    const counter = trafficCounterRef.current
+    if (!counter) return
+    const hasNewTraffic =
+      totals.upload > counter.observed.upload ||
+      totals.download > counter.observed.download
+    const observed = observeManagedTraffic(counter, totals)
+    // 核心累计值回退通常表示核心重启。旧累计值必须先成功补报，不能被新基线覆盖。
+    if (observed.reset) return
+    trafficCounterRef.current = observed.counter
+    localStorage.setItem(
+      MANAGED_TRAFFIC_STORAGE_KEY,
+      JSON.stringify(observed.counter),
+    )
+    if (hasNewTraffic) trafficSchedulerRef.current?.notifyActivity()
+  }, [
+    connectionResponse.data?.downloadTotal,
+    connectionResponse.data?.uploadTotal,
+  ])
+
+  useEffect(() => {
+    if (!running || !currentCode || !managedAuthReady) {
+      lastReportedTrafficRef.current = trafficTotalsRef.current
+      return
+    }
+
+    const counter =
+      trafficCounterRef.current ||
+      createManagedTrafficCounter(currentCode, trafficTotalsRef.current)
+    trafficCounterRef.current = counter
+    pendingManagedTrafficRef.current = undefined
+    localStorage.setItem(MANAGED_TRAFFIC_STORAGE_KEY, JSON.stringify(counter))
+
+    const scheduler = createManagedTrafficScheduler({
+      report: async (signal) => {
+        const report = reportClientTrafficRef.current
+        return report ? report(signal) : { status: 'inactive' }
+      },
+      takeRetryAfterMs: () => {
+        const delay = trafficReportRetryAfterRef.current
         trafficReportRetryAfterRef.current = 0
-        schedule(
-          TRAFFIC_REPORT_INTERVAL_MS +
-            Math.floor(Math.random() * TRAFFIC_REPORT_JITTER_MS),
-        )
-      } catch {
-        failures += 1
-        const backoff = Math.min(
-          TRAFFIC_REPORT_MAX_BACKOFF_MS,
-          TRAFFIC_REPORT_INTERVAL_MS * 2 ** Math.min(failures, 3),
-        )
-        schedule(
-          Math.max(
-            trafficReportRetryAfterRef.current,
-            backoff * (0.75 + Math.random() * 0.5),
-          ),
-        )
-      } finally {
-        trafficReportInFlightRef.current = false
-      }
+        return delay
+      },
+      onTransition: persistManagedTrafficDiagnostic,
+    })
+    trafficSchedulerRef.current = scheduler
+    scheduler.start()
+    const initialPayload = managedTrafficPayload(counter)
+    if (initialPayload.upload_total > 0 || initialPayload.download_total > 0) {
+      scheduler.notifyActivity()
     }
-
-    // 启动补报也错峰，避免服务或网络恢复时所有客户端同时写入。
-    schedule(5_000 + Math.floor(Math.random() * 25_000))
-
     return () => {
-      cancelled = true
-      if (timer !== undefined) window.clearTimeout(timer)
+      if (trafficSchedulerRef.current === scheduler) {
+        trafficSchedulerRef.current = null
+      }
+      scheduler.stop()
     }
-  }, [currentCode, reportClientTraffic, running])
+  }, [currentCode, managedAuthReady, running])
 
   // 每个客户端进程启动后刷新一次订阅；后续只在已连接时轻量检查服务端版本。
   // 定时检查不会盲目下载整份订阅，失败时指数退避并叠加抖动，避免惊群。

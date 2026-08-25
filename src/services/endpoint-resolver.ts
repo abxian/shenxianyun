@@ -1,5 +1,7 @@
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 
+import { cloneHttpRequestInit } from '@/services/http-request-init'
+
 /**
  * 端点发现（去掉写死 sub.jc116.com）：
  * 启动时从「发现源」拉取 endpoints.json，得到 api_bases / sub_base / download_base，
@@ -73,7 +75,7 @@ const normalizeProxy = (value: unknown): string => {
 export const fetchWithVerifiedTls = async (
   url: string,
   init: Parameters<typeof tauriFetch>[1],
-): ReturnType<typeof tauriFetch> => tauriFetch(url, init)
+): ReturnType<typeof tauriFetch> => tauriFetch(url, cloneHttpRequestInit(init))
 
 const sanitize = (data: unknown): Endpoints | null => {
   if (!data || typeof data !== 'object') return null
