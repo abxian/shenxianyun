@@ -1,4 +1,3 @@
-/Users/cgnay/.zshenv:.:1: no such file or directory: /tmp/shenxianyun-cargo-20260802/env
 [CmdletBinding()]
 param(
     [ValidateSet("Run", "Build", "Record", "Status", "Publish", "SelfTest")]
