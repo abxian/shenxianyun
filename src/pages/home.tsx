@@ -139,6 +139,10 @@ import {
   type ManagedTrafficReportOutcome,
   type ManagedTrafficSchedulerTransition,
 } from '@/services/managed-traffic-scheduler'
+import {
+  downloadAndInstallWithFallback,
+  SHENXIANYUN_RELEASES_URL,
+} from '@/services/update'
 import { VISIBLE_APP_NAME } from '@/services/visible-brand'
 import getSystem from '@/utils/get-system'
 import {
@@ -866,9 +870,9 @@ const HomePage = () => {
     // macOS 没有 Apple 开发者签名/公证，就地自动更新不可靠（会被 Gatekeeper 拦）。
     // 改为打开 Releases 页让用户手动下载安装。
     if (isMacOS) {
-      await openWebUrl(
-        'https://github.com/abxian/shenxianyun/releases/latest',
-      ).catch(() => undefined)
+      await openWebUrl(`${SHENXIANYUN_RELEASES_URL}/latest`).catch(
+        () => undefined,
+      )
       return
     }
     setUpdating(true)
@@ -877,29 +881,28 @@ const HomePage = () => {
     let total = 0
     let downloaded = 0
     try {
-      await updateInfo.downloadAndInstall(
-        (event: {
-          event: string
-          data?: { contentLength?: number; chunkLength?: number }
-        }) => {
-          if (event.event === 'Started') {
-            total = event.data?.contentLength ?? 0
-          } else if (event.event === 'Progress') {
-            downloaded += event.data?.chunkLength ?? 0
-            if (total > 0) {
-              setUpdPercent(
-                Math.min(99, Math.round((downloaded / total) * 100)),
-              )
-            }
-          } else if (event.event === 'Finished') {
-            setUpdPercent(100)
+      await downloadAndInstallWithFallback(updateInfo, (event) => {
+        if (event.phase === 'fallback') {
+          total = 0
+          downloaded = 0
+          setUpdPercent(0)
+          setStatus('Dufs 暂不可用，正在切换 GitHub 备用源...')
+        } else if (event.phase === 'progress') {
+          total = event.contentLength ?? total
+          downloaded += event.chunkLength ?? 0
+          if (total > 0) {
+            setUpdPercent(Math.min(99, Math.round((downloaded / total) * 100)))
           }
-        },
-      )
+        } else if (event.phase === 'verified') {
+          setUpdPercent(100)
+        } else if (event.phase === 'installing') {
+          setStatus('更新包校验通过，正在安装...')
+        }
+      })
       setStatus('更新完成，正在重启...')
       await relaunch()
     } catch {
-      setStatus('软件下载失败，请稍后重试')
+      setStatus('Dufs 与 GitHub 更新源均不可用，请稍后重试')
     } finally {
       setUpdating(false)
     }

@@ -3,7 +3,7 @@ use crate::{
     singleton,
     utils::{brand, dirs},
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use chrono::Utc;
 use clash_verge_logging::{Type, logging};
 use parking_lot::RwLock;
@@ -12,7 +12,179 @@ use std::{
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
 };
+use tauri::{AppHandle, Emitter as _};
 use tauri_plugin_updater::{Update, UpdaterExt as _};
+
+pub const UPDATE_FALLBACK_PROGRESS_EVENT: &str = "shenxianyun://update-fallback-progress";
+static INTERACTIVE_UPDATE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+const DUFS_UPDATE_ENDPOINTS: &[&str] = &[
+    "https://sxy.sxnn.de:5443/sxy/update.json",
+    "http://114.80.36.225:5011/sxy/update.json",
+];
+const GITHUB_UPDATE_ENDPOINTS: &[&str] = &[
+    "https://gh-proxy.org/https://github.com/abxian/shenxianyun/releases/download/updater/update-proxy.json",
+    "https://github.com/abxian/shenxianyun/releases/download/updater/update.json",
+];
+
+#[derive(Clone, Copy, Debug)]
+enum UpdateSource {
+    Dufs,
+    Github,
+}
+
+impl UpdateSource {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Dufs => "dufs",
+            Self::Github => "github",
+        }
+    }
+
+    const fn endpoints(self) -> &'static [&'static str] {
+        match self {
+            Self::Dufs => DUFS_UPDATE_ENDPOINTS,
+            Self::Github => GITHUB_UPDATE_ENDPOINTS,
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateFallbackProgress {
+    source: &'static str,
+    phase: &'static str,
+    chunk_length: Option<usize>,
+    content_length: Option<u64>,
+}
+
+struct InteractiveUpdateGuard;
+
+impl InteractiveUpdateGuard {
+    fn acquire() -> Result<Self> {
+        INTERACTIVE_UPDATE_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| Self)
+            .map_err(|_| anyhow!("an app update is already in progress"))
+    }
+}
+
+impl Drop for InteractiveUpdateGuard {
+    fn drop(&mut self) {
+        INTERACTIVE_UPDATE_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+fn emit_update_progress(
+    app_handle: &AppHandle,
+    source: UpdateSource,
+    phase: &'static str,
+    chunk_length: Option<usize>,
+    content_length: Option<u64>,
+) {
+    let _ = app_handle.emit(
+        UPDATE_FALLBACK_PROGRESS_EVENT,
+        UpdateFallbackProgress {
+            source: source.label(),
+            phase,
+            chunk_length,
+            content_length,
+        },
+    );
+}
+
+fn normalize_update_version(version: &str) -> Option<&str> {
+    let trimmed = version.trim();
+    let normalized = trimmed.strip_prefix('v').unwrap_or(trimmed);
+    let valid = !normalized.is_empty()
+        && normalized.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        && normalized
+            .bytes()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'.' | b'-' | b'+'));
+    valid.then_some(normalized)
+}
+
+async fn download_verified_update(
+    app_handle: &AppHandle,
+    source: UpdateSource,
+    expected_version: &str,
+) -> Result<(Update, Vec<u8>)> {
+    emit_update_progress(app_handle, source, "checking", None, None);
+
+    let endpoints = source
+        .endpoints()
+        .iter()
+        .map(|endpoint| endpoint.parse())
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let updater = app_handle.updater_builder().endpoints(endpoints)?.build()?;
+    let update = updater
+        .check()
+        .await?
+        .ok_or_else(|| anyhow!("{} update metadata has no applicable update", source.label()))?;
+
+    let remote_version = normalize_update_version(&update.version)
+        .ok_or_else(|| anyhow!("{} update metadata has an invalid version", source.label()))?;
+    if remote_version != expected_version {
+        return Err(anyhow!(
+            "{} update version mismatch: expected {}, got {}",
+            source.label(),
+            expected_version,
+            remote_version
+        ));
+    }
+
+    let progress_handle = app_handle.clone();
+    let finish_handle = app_handle.clone();
+    let bytes = update
+        .download(
+            move |chunk_length, content_length| {
+                emit_update_progress(&progress_handle, source, "progress", Some(chunk_length), content_length);
+            },
+            move || {
+                emit_update_progress(&finish_handle, source, "downloaded", None, None);
+            },
+        )
+        .await?;
+
+    // Update::download only returns after the Tauri updater has verified the
+    // package signature with the configured public key.
+    emit_update_progress(app_handle, source, "verified", None, None);
+    Ok((update, bytes))
+}
+
+/// Download and install an exact version without opening a browser. Dufs is
+/// always attempted first; only metadata/download/signature failures switch to
+/// the GitHub updater endpoints. Installation itself is attempted exactly once.
+pub async fn install_update_with_fallback(app_handle: &AppHandle, expected_version: &str) -> Result<()> {
+    let _interactive_guard = InteractiveUpdateGuard::acquire()?;
+    let expected_version =
+        normalize_update_version(expected_version).ok_or_else(|| anyhow!("invalid expected update version"))?;
+
+    let (update, bytes, source) = match download_verified_update(app_handle, UpdateSource::Dufs, expected_version).await
+    {
+        Ok((update, bytes)) => (update, bytes, UpdateSource::Dufs),
+        Err(dufs_error) => {
+            logging!(
+                warn,
+                Type::System,
+                "Dufs updater failed before install, switching to GitHub: {dufs_error}"
+            );
+            emit_update_progress(app_handle, UpdateSource::Github, "fallback", None, None);
+            match download_verified_update(app_handle, UpdateSource::Github, expected_version).await {
+                Ok((update, bytes)) => (update, bytes, UpdateSource::Github),
+                Err(github_error) => {
+                    return Err(anyhow!(
+                        "Dufs and GitHub update sources are unavailable: Dufs: {dufs_error}; GitHub: {github_error}"
+                    ));
+                }
+            }
+        }
+    };
+
+    emit_update_progress(app_handle, source, "installing", None, None);
+    update.install(bytes)?;
+    Ok(())
+}
 
 pub struct SilentUpdater {
     update_ready: AtomicBool,
@@ -580,5 +752,33 @@ mod tests {
     fn test_cache_meta_missing_required_field() {
         let result = serde_json::from_str::<UpdateCacheMeta>(r#"{"version":"2.5.0"}"#);
         assert!(result.is_err()); // missing downloaded_at
+    }
+
+    #[test]
+    fn test_update_version_normalization_rejects_invalid_input() {
+        assert_eq!(normalize_update_version("v2.5.41"), Some("2.5.41"));
+        assert_eq!(normalize_update_version(" 2.5.41-beta.1 "), Some("2.5.41-beta.1"));
+        assert_eq!(normalize_update_version(""), None);
+        assert_eq!(normalize_update_version("latest"), None);
+        assert_eq!(normalize_update_version("2.5.41/../../bad"), None);
+    }
+
+    #[test]
+    fn test_update_sources_are_separated_and_ordered() {
+        assert_eq!(UpdateSource::Dufs.endpoints(), DUFS_UPDATE_ENDPOINTS);
+        assert_eq!(UpdateSource::Github.endpoints(), GITHUB_UPDATE_ENDPOINTS);
+        assert!(DUFS_UPDATE_ENDPOINTS.iter().all(|url| !url.contains("github.com")));
+        assert!(GITHUB_UPDATE_ENDPOINTS.iter().all(|url| url.contains("github.com")));
+        assert!(DUFS_UPDATE_ENDPOINTS[0].starts_with("https://sxy.sxnn.de:5443/"));
+        assert!(GITHUB_UPDATE_ENDPOINTS[1].starts_with("https://github.com/abxian/shenxianyun/"));
+    }
+
+    #[test]
+    fn test_interactive_update_guard_prevents_parallel_installers() {
+        INTERACTIVE_UPDATE_ACTIVE.store(false, Ordering::Release);
+        let guard = InteractiveUpdateGuard::acquire().unwrap();
+        assert!(InteractiveUpdateGuard::acquire().is_err());
+        drop(guard);
+        assert!(InteractiveUpdateGuard::acquire().is_ok());
     }
 }

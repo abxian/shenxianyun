@@ -1,7 +1,7 @@
 use super::CmdResult;
 use crate::constants::files;
-use crate::core::autostart;
 use crate::core::handle;
+use crate::core::{autostart, updater};
 use crate::{cmd::StringifyErr as _, feat, utils, utils::dirs};
 use clash_verge_logging::{Type, logging};
 use smartstring::alias::String;
@@ -169,6 +169,14 @@ pub async fn exit_app() {
 pub async fn restart_app() -> CmdResult<()> {
     feat::restart_app().await;
     Ok(())
+}
+
+/// 在应用内安装指定版本：Dufs 优先，下载或校验失败后自动切换 GitHub。
+#[tauri::command]
+pub async fn install_app_update_with_fallback(app_handle: AppHandle, expected_version: String) -> CmdResult<()> {
+    updater::install_update_with_fallback(&app_handle, expected_version.as_str())
+        .await
+        .stringify_err()
 }
 
 /// 删除旧配置并直接重启。这里不能调用常规 restart_app，因为常规重启会先把

@@ -149,6 +149,7 @@ mod app_init {
             cmd::get_system_hostname,
             cmd::get_stable_device_key,
             cmd::restart_app,
+            cmd::install_app_update_with_fallback,
             cmd::factory_reset_app,
             cmd::start_core,
             cmd::stop_core,
