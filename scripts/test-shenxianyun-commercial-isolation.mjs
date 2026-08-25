@@ -30,6 +30,30 @@ test('keeps Shenxianyun UI, API discovery, and updater channels isolated', () =>
   )
 })
 
+test('keeps native and translated user-facing branding private and consistent', () => {
+  const brandSource = read('src-tauri/src/utils/brand.rs')
+  const notificationSource = read('src-tauri/src/utils/notification.rs')
+  const updaterSource = read('src-tauri/src/core/updater.rs')
+  const traySource = read('src-tauri/src/core/tray/mod.rs')
+  const serviceSource = read('src-tauri/src/core/service.rs')
+  const initSource = read('src-tauri/src/utils/init.rs')
+  const i18nSource = read('src/services/i18n.ts')
+  const homeSource = read('src/pages/home.tsx')
+
+  assert.match(brandSource, /VISIBLE_APP_NAME:\s*&str\s*=\s*"神仙云"/)
+  assert.match(notificationSource, /brand::native_text/)
+  assert.match(updaterSource, /brand::native_text/)
+  assert.match(traySource, /build_tray_tooltip/)
+  assert.match(traySource, /build_tray_version_label/)
+  assert.match(traySource, /load_managed_auth/)
+  assert.match(traySource, /mask_all_profile_names/)
+  assert.match(serviceSource, /brand::native_text/)
+  assert.match(initSource, /brand::VISIBLE_APP_NAME/)
+  assert.match(i18nSource, /postProcess:\s*\['visibleBrand'\]/)
+  assert.match(homeSource, /managedProfileName\(VISIBLE_APP_NAME\)/)
+  assert.doesNotMatch(homeSource, /name:\s*input/)
+})
+
 test('keeps stable device identity local and sends only the derived key', () => {
   const networkSource = read('src-tauri/src/cmd/network.rs')
   const rustEntry = read('src-tauri/src/lib.rs')

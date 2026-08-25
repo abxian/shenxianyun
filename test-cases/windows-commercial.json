@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "caseVersion": "2026-08-25.1",
+  "caseVersion": "2026-08-25.2",
   "title": "神仙云 Windows 商业化加固候选版 AI 验收",
   "triggerPhrase": "开始测试",
   "repository": "abxian/shenxianyun",
@@ -50,6 +50,12 @@
       "title": "订阅刷新策略测试",
       "executable": "pnpm",
       "arguments": ["test:subscription-refresh"]
+    },
+    {
+      "id": "AUTO-MANAGED-PRESENTATION",
+      "title": "官方订阅名称与全语言可见品牌隐私测试",
+      "executable": "pnpm",
+      "arguments": ["test:managed-subscription"]
     },
     {
       "id": "AUTO-UPDATER",
@@ -123,11 +129,15 @@
       "risk": "low",
       "requires": ["应用已启动"],
       "steps": [
-        "检查窗口、托盘、关于和通知显示神仙云",
+        "检查窗口、首页系统信息、设置、托盘、关于和通知显示神仙云",
+        "鼠标悬停托盘图标，确认首行为神仙云且不显示当前配置名、提取码或 Clash Verge",
+        "打开托盘配置子菜单，确认官方配置显示为神仙云 官方订阅且不显示提取码",
+        "展开托盘更多子菜单，确认版本项使用神仙云且不显示 Verge 版本",
+        "切换至少中文和英文界面，确认用户可见文本均不显示 Clash Verge 或 Verge 品牌",
         "确认业务线路属于神仙云服务",
-        "检查更新入口未指向 52nm 或吾爱云仓库"
+        "检查更新入口、更新提示和更新安装窗口未指向或显示 52nm、吾爱云或旧品牌"
       ],
-      "expected": "界面品牌为神仙云，业务端点与升级通道均保持神仙云独立链路。",
+      "expected": "主窗口、多语言界面、托盘提示与菜单、系统通知和更新界面均为神仙云；托盘提示和官方配置不泄露配置名或提取码；业务端点与升级通道保持神仙云独立链路。",
       "rollback": "无。"
     },
     {
@@ -168,16 +178,17 @@
       "requires": [
         "已连接测试节点",
         "脱敏诊断 version 2 已 ready",
-        "服务端归一统计仅在神仙云后端分支部署后由主审验收"
+        "神仙云后端 canonical device 版本已部署，生产聚合仍只由主审只读核验"
       ],
       "steps": [
-        "记录 acknowledgedSequence 和 lastAcknowledgedAt 脱敏基线",
+        "产生流量前记录 acknowledgedSequence 和 lastAcknowledgedAt 脱敏基线，不复制整个 localStorage",
         "产生少量上下行流量",
-        "60 秒内确认序列严格增加且确认时间更新",
+        "60 秒内确认同一运行周期出现新的 acknowledged、序列严格增加且确认时间更新",
+        "等待期间不得重启应用、切换账号或重新导入来人为重建调度器",
         "若超时，确认自动取消并以同一序列重试",
         "在报告中把客户端 API 确认与主审数据库聚合核验分开"
       ],
-      "expected": "客户端累计增长且确认序列推进；后端未部署时数据库聚合明确写待主审核验，不得伪报通过。",
+      "expected": "客户端累计增长且确认序列推进；生产数据库设备与流量聚合明确写由主审核验，不得由 Windows 客户端推断。",
       "rollback": "停止测试流量并断开节点。"
     },
     {

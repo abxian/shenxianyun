@@ -11,7 +11,7 @@
 - 原始日志和安装包只留在已忽略的 `.ai-test-results/`。
 - GitHub Issue 只上传结构化状态、提交号、时长、Actions URL、构件哈希和脱敏摘要。
 - 禁止上传订阅 URL、提取码、Token、Cookie、密码、密钥、MachineGuid、用户名、主机名、私人路径或业务地址。
-- 后端商业归一分支尚未部署时，服务端设备/流量聚合必须写“待主审核验”，不能把客户端 API 成功写成数据库已通过。
+- 神仙云 canonical device 后端已经部署；服务端设备/流量聚合仍必须写“由主审核验”，不能把客户端 API 成功写成数据库已通过。
 - 安装、代理、断网和重装只可在备用机、虚拟机、Sandbox 或明确可回滚的测试机执行。
 
 ## 首次拉取
@@ -67,7 +67,9 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 
 状态只有 `pass`、`fail`、`blocked`、`not_run`。完成项必须有脱敏摘要与证据，且不能跳过前项。失败摘要写步骤、现象、复现性和回滚结果，但原始日志不上传。
 
-`WIN-TRAFFIC-001` 只允许读取脱敏诊断 `shenxianyun.managedTrafficStatus.v1` 的 version、state、失败分类、确认序列和时间，不复制整个 localStorage 或请求内容。通过条件是产生少量双向流量后 60 秒内 `acknowledgedSequence` 严格增加且 `lastAcknowledgedAt` 更新；超时必须自动取消并用同一序列重试。Windows 报告只证明客户端行为，生产数据库归一必须由主审在后端部署后通过授权只读通道核验。
+`WIN-ISOLATION-001` 必须检查首页系统信息、设置页、托盘提示、托盘配置菜单、更多菜单版本项、系统通知、更新提示和安装窗口。托盘提示不得包含当前配置名；官方配置必须显示“神仙云 官方订阅”，不得显示提取码；至少切换中文和英文确认可见文本不出现 `Clash Verge` 或 `Verge` 品牌。兼容性安装包名不属于运行时品牌失败项。
+
+`WIN-TRAFFIC-001` 只允许读取脱敏诊断 `shenxianyun.managedTrafficStatus.v1` 的 version、state、失败分类、确认序列和时间，不复制整个 localStorage 或请求内容。必须先记录 `acknowledgedSequence` 基线，再产生少量双向流量并开始 60 秒计时；等待期间不得重启应用、切换账号或重新导入。通过条件是在同一运行周期内看到新的 `acknowledged`、序列严格增加且 `lastAcknowledgedAt` 更新；超时必须自动取消并用同一序列重试。Windows 报告只证明客户端行为，生产数据库归一必须由主审通过授权只读通道核验。
 
 `WIN-REINSTALL-ID-001` 只能记录稳定设备键是否成功及重装前后是否相同，绝不能显示、保存或上传键值本身。
 

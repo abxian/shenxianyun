@@ -101,11 +101,10 @@ fn extract_subscription_info(link_parsed: &Url) -> Option<(std::string::String, 
 }
 
 fn extract_subscription_url(link_parsed: &Url) -> Option<std::string::String> {
-    let query = link_parsed.query()?;
-    let prefix = "url=";
-    let pos = query.find(prefix)?;
-    let raw_url = query[pos + prefix.len()..].trim();
-    Some(decode_subscription_url(raw_url))
+    link_parsed
+        .query_pairs()
+        .find(|(key, _)| key == "url")
+        .map(|(_, value)| decode_subscription_url(value.trim()))
 }
 
 fn decode_subscription_url(raw_url: &str) -> std::string::String {
@@ -237,6 +236,18 @@ mod tests {
         let (url, name) =
             extract_subscription_info(&link).ok_or_else(|| anyhow::anyhow!("legacy request was not parsed"))?;
         assert_eq!(url, "https://example.test/sub/code");
+        assert_eq!(name.as_deref(), Some("legacy"));
+        Ok(())
+    }
+
+    #[test]
+    fn keeps_encoded_nested_query_inside_legacy_subscription_url() -> anyhow::Result<()> {
+        let link = Url::parse(
+            "shenxianyun://install-config?name=legacy&url=https%3A%2F%2Fexample.test%2Fsub%3Ftoken%3Done%26mode%3Dfull",
+        )?;
+        let (url, name) =
+            extract_subscription_info(&link).ok_or_else(|| anyhow::anyhow!("legacy request was not parsed"))?;
+        assert_eq!(url, "https://example.test/sub?token=one&mode=full");
         assert_eq!(name.as_deref(), Some("legacy"));
         Ok(())
     }
