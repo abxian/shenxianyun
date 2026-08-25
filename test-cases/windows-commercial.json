@@ -1,0 +1,241 @@
+{
+  "schemaVersion": 1,
+  "caseVersion": "2026-08-25.1",
+  "title": "神仙云 Windows 商业化加固候选版 AI 验收",
+  "triggerPhrase": "开始测试",
+  "repository": "abxian/shenxianyun",
+  "targetBranch": "codex/sync-commercial-hardening-20260825",
+  "allowedBranches": ["codex/sync-commercial-hardening-20260825"],
+  "requiredAncestor": "de6f3f00cd77b3fb246dbd96a243e8cef73f669a",
+  "developmentWorkflow": "dev.yml",
+  "automatedChecks": [
+    {
+      "id": "AUTO-INSTALL",
+      "title": "安装锁定依赖",
+      "executable": "pnpm",
+      "arguments": ["install", "--frozen-lockfile"]
+    },
+    {
+      "id": "AUTO-TYPECHECK",
+      "title": "TypeScript 类型检查",
+      "executable": "pnpm",
+      "arguments": ["typecheck"]
+    },
+    {
+      "id": "AUTO-FORMAT",
+      "title": "格式检查",
+      "executable": "pnpm",
+      "arguments": ["format:check"]
+    },
+    {
+      "id": "AUTO-LINT",
+      "title": "ESLint 检查",
+      "executable": "pnpm",
+      "arguments": ["lint"]
+    },
+    {
+      "id": "AUTO-TRAFFIC",
+      "title": "托管流量幂等、超时恢复与活动唤醒测试",
+      "executable": "pnpm",
+      "arguments": ["test:managed-traffic"]
+    },
+    {
+      "id": "AUTO-IMPORT",
+      "title": "安全导入与节点健康测试",
+      "executable": "pnpm",
+      "arguments": ["test:import-health"]
+    },
+    {
+      "id": "AUTO-REFRESH",
+      "title": "订阅刷新策略测试",
+      "executable": "pnpm",
+      "arguments": ["test:subscription-refresh"]
+    },
+    {
+      "id": "AUTO-UPDATER",
+      "title": "更新平台映射测试",
+      "executable": "pnpm",
+      "arguments": ["test:updater-platforms"]
+    },
+    {
+      "id": "AUTO-ISOLATION",
+      "title": "神仙云品牌、端点、升级源与设备键隔离",
+      "executable": "pnpm",
+      "arguments": ["test:commercial-isolation"]
+    },
+    {
+      "id": "AUTO-WINDOWS-KIT",
+      "title": "Windows 验收顺序、构建门禁与结论自检",
+      "executable": "powershell",
+      "arguments": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        ".\\scripts\\windows-ai-test.ps1",
+        "-Mode",
+        "SelfTest"
+      ]
+    },
+    {
+      "id": "AUTO-DIFF",
+      "title": "Git 补丁空白错误检查",
+      "executable": "git",
+      "arguments": ["diff", "--check"]
+    }
+  ],
+  "manualChecks": [
+    {
+      "id": "WIN-BUILD-RESUME-001",
+      "title": "Build 重入复用同一 Development Test",
+      "risk": "low",
+      "requires": [
+        "首次 Build 已成功并记录 Development Test URL",
+        "仍使用同一个 RUN_ID"
+      ],
+      "steps": [
+        "首次 Build 成功后记录脱敏 Actions URL",
+        "用同一个 RUN_ID 再次执行 Build",
+        "确认没有派发新任务且构件哈希相同"
+      ],
+      "expected": "第二次 Build 复用同一成功任务、URL 和构件哈希。",
+      "rollback": "若任务或 URL 改变，停止安装并记录 fail。"
+    },
+    {
+      "id": "WIN-INSTALL-001",
+      "title": "临时安装包安装与首次启动",
+      "risk": "medium",
+      "requires": [
+        "Development Test Windows x64 构件",
+        "备用 Windows、虚拟机或 Windows Sandbox"
+      ],
+      "steps": [
+        "确认日常生产客户端未运行",
+        "安装本次 x64 EXE",
+        "启动并观察至少 60 秒"
+      ],
+      "expected": "安装完成；应用无白屏、闪退或循环报错。",
+      "rollback": "退出并卸载；检查并关闭残留系统代理。"
+    },
+    {
+      "id": "WIN-ISOLATION-001",
+      "title": "神仙云品牌、业务端点与升级通道隔离",
+      "risk": "low",
+      "requires": ["应用已启动"],
+      "steps": [
+        "检查窗口、托盘、关于和通知显示神仙云",
+        "确认业务线路属于神仙云服务",
+        "检查更新入口未指向 52nm 或吾爱云仓库"
+      ],
+      "expected": "界面品牌为神仙云，业务端点与升级通道均保持神仙云独立链路。",
+      "rollback": "无。"
+    },
+    {
+      "id": "WIN-IMPORT-001",
+      "title": "专用测试账号安全导入",
+      "risk": "medium",
+      "requires": ["运行时安全提供的专用测试账号或提取码"],
+      "steps": [
+        "输入专用测试导入信息",
+        "等待节点加载",
+        "确认报告不含凭据和订阅地址"
+      ],
+      "expected": "导入成功、节点可见且没有重复配置。",
+      "rollback": "删除测试配置；不得上传任何凭据。"
+    },
+    {
+      "id": "WIN-CONNECT-001",
+      "title": "节点连接、切换与基础联网",
+      "risk": "medium",
+      "requires": ["已导入专用测试账号"],
+      "steps": ["连接一个测试节点并访问普通网页", "切换另一节点并再次访问"],
+      "expected": "两节点均可连接，切换后网络恢复。",
+      "rollback": "退出客户端并关闭 Windows 手动代理。"
+    },
+    {
+      "id": "WIN-REFRESH-001",
+      "title": "订阅手动刷新",
+      "risk": "low",
+      "requires": ["已导入专用测试账号"],
+      "steps": ["手动刷新订阅", "检查节点和配置数量"],
+      "expected": "刷新成功且不重复创建配置；失败时提示明确。",
+      "rollback": "无。"
+    },
+    {
+      "id": "WIN-TRAFFIC-001",
+      "title": "双向流量、确认序列与服务端归一统计",
+      "risk": "medium",
+      "requires": [
+        "已连接测试节点",
+        "脱敏诊断 version 2 已 ready",
+        "服务端归一统计仅在神仙云后端分支部署后由主审验收"
+      ],
+      "steps": [
+        "记录 acknowledgedSequence 和 lastAcknowledgedAt 脱敏基线",
+        "产生少量上下行流量",
+        "60 秒内确认序列严格增加且确认时间更新",
+        "若超时，确认自动取消并以同一序列重试",
+        "在报告中把客户端 API 确认与主审数据库聚合核验分开"
+      ],
+      "expected": "客户端累计增长且确认序列推进；后端未部署时数据库聚合明确写待主审核验，不得伪报通过。",
+      "rollback": "停止测试流量并断开节点。"
+    },
+    {
+      "id": "WIN-RESTART-001",
+      "title": "退出重启后的配置与累计状态",
+      "risk": "low",
+      "requires": ["已完成连接和流量测试"],
+      "steps": ["正常退出并重新启动", "检查配置、连接选择和累计状态"],
+      "expected": "配置不丢失，累计流量不倒退或重复跳增。",
+      "rollback": "无。"
+    },
+    {
+      "id": "WIN-RECONNECT-001",
+      "title": "断网重连与心跳恢复",
+      "risk": "medium",
+      "requires": ["已连接测试节点"],
+      "steps": [
+        "短暂断开 Windows 网络",
+        "恢复网络并等待自动恢复",
+        "再次访问测试网页"
+      ],
+      "expected": "恢复后可继续连接，不批量重放旧心跳。",
+      "rollback": "恢复网络并关闭残留代理。"
+    },
+    {
+      "id": "WIN-PROXY-ROLLBACK-001",
+      "title": "退出后的系统代理恢复",
+      "risk": "medium",
+      "requires": ["曾开启系统代理"],
+      "steps": [
+        "正常退出客户端",
+        "检查 Windows 代理设置",
+        "不经客户端访问普通网页"
+      ],
+      "expected": "系统代理恢复且普通网络不被阻断。",
+      "rollback": "手动关闭代理并记录 fail。"
+    },
+    {
+      "id": "WIN-REINSTALL-ID-001",
+      "title": "重装后的统一设备身份",
+      "risk": "high",
+      "requires": ["专用测试虚拟机或可回滚快照", "同一个专用测试账号"],
+      "steps": [
+        "卸载前只记录稳定设备键是否读取成功",
+        "卸载并重装同一构件",
+        "重新导入同一账号",
+        "只记录重装前后稳定设备键是否相同",
+        "确认新令牌心跳成功并注明 canonical device 待主审核验"
+      ],
+      "expected": "稳定设备键比较为相同、重新导入与心跳成功；物理设备名额归一由后端部署后的主审只读核验。",
+      "rollback": "恢复快照或卸载测试客户端；禁止记录原始设备标识。"
+    }
+  ],
+  "prohibitedEvidence": [
+    "订阅 URL 或提取码",
+    "Token、Cookie、Authorization、密码和密钥",
+    "Windows MachineGuid 或其他原始设备标识",
+    "用户名、主机名、用户目录和私人文件路径",
+    "未脱敏账号、用户数据和业务地址"
+  ]
+}
