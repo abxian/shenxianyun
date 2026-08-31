@@ -937,6 +937,8 @@ const HomePage = () => {
   const managedAuthRef = useRef<ManagedAuth | null>(null)
   // presence 上报的节流状态，逻辑见 services/presence-throttle。
   const presenceThrottleRef = useRef(createPresenceThrottleState())
+  // 服务端升级建议本次启动是否已提示过。
+  const upgradeHintShownRef = useRef(false)
   // eslint-disable-next-line @eslint-react/no-unused-state -- readiness is consumed by the subscription lifecycle effect, not JSX.
   const [managedAuthReady, setManagedAuthReady] = useState(false)
   const startupRefreshAttemptedRef = useRef(false)
@@ -1692,6 +1694,14 @@ const HomePage = () => {
           bound_devices?: number
           bound_limit?: number
           show_usage_status?: boolean
+          // 服务端下发的升级建议。内置 updater 检查失败时是静默的，
+          // 这条旁路让服务端仍能把「你的版本太旧」告诉用户。
+          upgrade_hint?: {
+            message?: string
+            current_version?: string
+            min_version?: string
+            download_url?: string
+          } | null
         } | null
         if (!response.ok || !data?.ok) {
           // 429 是反代的限流，不是业务错误：按 Retry-After 退避，别继续打。
@@ -1736,6 +1746,12 @@ const HomePage = () => {
             showUsage: data.show_usage_status === true,
             updatedAt: Date.now(),
           })
+          // 每次启动只提示一次，心跳每 2 分钟一轮，不能每轮都刷状态栏。
+          const hint = data.upgrade_hint?.message?.trim()
+          if (hint && !upgradeHintShownRef.current) {
+            upgradeHintShownRef.current = true
+            setStatus(hint)
+          }
         }
         clearPendingPresence(pending.id)
         return
