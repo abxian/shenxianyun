@@ -32,6 +32,7 @@
     "test:subscription-refresh": "node --test scripts/test-subscription-refresh.mjs",
     "test:managed-subscription": "node --experimental-strip-types --test scripts/test-managed-subscription.mjs",
     "test:managed-traffic": "node --experimental-strip-types --test scripts/test-http-request-init.mjs scripts/test-managed-traffic-counter.mjs scripts/test-managed-traffic-diagnostics.mjs scripts/test-managed-traffic-scheduler.mjs",
+    "test:presence-throttle": "node --experimental-strip-types --test scripts/test-presence-throttle.mjs",
     "test:commercial-isolation": "node --test scripts/test-shenxianyun-commercial-isolation.mjs",
     "test:updater-fallback": "node --test scripts/test-updater-fallback.mjs",
     "test:updater-platforms": "node --test scripts/test-updater-platforms.mjs",
