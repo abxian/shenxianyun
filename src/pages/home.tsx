@@ -140,6 +140,14 @@ import {
   type ManagedTrafficSchedulerTransition,
 } from '@/services/managed-traffic-scheduler'
 import {
+  createPresenceThrottleState,
+  markPresenceAccepted,
+  markPresenceRateLimited,
+  markPresenceSent,
+  PRESENCE_STATE_DEBOUNCE_MS,
+  shouldSendPresence,
+} from '@/services/presence-throttle'
+import {
   downloadAndInstallWithFallback,
   SHENXIANYUN_RELEASES_URL,
 } from '@/services/update'
@@ -927,6 +935,10 @@ const HomePage = () => {
     ((signal: AbortSignal) => Promise<ManagedTrafficReportOutcome>) | null
   >(null)
   const managedAuthRef = useRef<ManagedAuth | null>(null)
+  // presence 上报的节流状态，逻辑见 services/presence-throttle。
+  const presenceThrottleRef = useRef(createPresenceThrottleState())
+  // 服务端升级建议本次启动是否已提示过。
+  const upgradeHintShownRef = useRef(false)
   // eslint-disable-next-line @eslint-react/no-unused-state -- readiness is consumed by the subscription lifecycle effect, not JSX.
   const [managedAuthReady, setManagedAuthReady] = useState(false)
   const startupRefreshAttemptedRef = useRef(false)
@@ -960,6 +972,19 @@ const HomePage = () => {
   const tunOn = verge?.enable_tun_mode || false
   const proxyStateMismatch = systemProxyConfigOn && !systemProxyOn
   const running = tunOn || systemProxyOn
+  // presence 上报只跟随「稳定后」的 running。UI 仍用 running 即时反馈，
+  // 但网络副作用必须等状态真正定下来，避免刷新/重试期间的瞬时翻转
+  // 被当成一次真实的启停，向服务端多发一对 offline+heartbeat。
+  // eslint-disable-next-line @eslint-react/no-unused-state -- 仅供 presence/流量上报的生命周期 effect 使用，UI 一律用即时的 running。
+  const [stableRunning, setStableRunning] = useState(running)
+  useEffect(() => {
+    if (running === stableRunning) return
+    const timer = window.setTimeout(
+      () => setStableRunning(running),
+      PRESENCE_STATE_DEBOUNCE_MS,
+    )
+    return () => window.clearTimeout(timer)
+  }, [running, stableRunning])
   const systemProxyChip: {
     label: string
     color: 'success' | 'warning' | 'default'
@@ -1623,6 +1648,14 @@ const HomePage = () => {
     async (online: boolean) => {
       const value = currentCode
       if (!value) return
+
+      // 节流闸门。上游任何来源（状态抖动、事件重复、窗口聚焦）都可能重复触发，
+      // 这里统一挡住，保证服务端看到的上报节奏与设计一致。
+      const now = Date.now()
+      const throttle = presenceThrottleRef.current
+      if (!shouldSendPresence(throttle, online, now).send) return
+      markPresenceSent(throttle, online, now)
+
       const pending = queuePendingPresence(value, online)
       const auth = managedAuthRef.current
       if (auth?.accessCode === value) {
@@ -1661,8 +1694,26 @@ const HomePage = () => {
           bound_devices?: number
           bound_limit?: number
           show_usage_status?: boolean
+          // 服务端下发的升级建议。内置 updater 检查失败时是静默的，
+          // 这条旁路让服务端仍能把「你的版本太旧」告诉用户。
+          upgrade_hint?: {
+            message?: string
+            current_version?: string
+            min_version?: string
+            download_url?: string
+          } | null
         } | null
         if (!response.ok || !data?.ok) {
+          // 429 是反代的限流，不是业务错误：按 Retry-After 退避，别继续打。
+          // 反代已配置 limit_req_status 429 + Retry-After。
+          if (response.status === 429) {
+            markPresenceRateLimited(
+              throttle,
+              response.headers.get('retry-after'),
+              Date.now(),
+            )
+            throw new Error('设备状态上报被限流，稍后重试')
+          }
           if (
             online &&
             (data?.code === 'device_limit' ||
@@ -1680,6 +1731,7 @@ const HomePage = () => {
           }
           throw new Error(data?.message || '设备状态上报失败')
         }
+        markPresenceAccepted(throttle)
         if (online) {
           await syncExpiresAt(data.expires_at)
           setClientAccountState({
@@ -1694,6 +1746,12 @@ const HomePage = () => {
             showUsage: data.show_usage_status === true,
             updatedAt: Date.now(),
           })
+          // 每次启动只提示一次，心跳每 2 分钟一轮，不能每轮都刷状态栏。
+          const hint = data.upgrade_hint?.message?.trim()
+          if (hint && !upgradeHintShownRef.current) {
+            upgradeHintShownRef.current = true
+            setStatus(hint)
+          }
         }
         clearPendingPresence(pending.id)
         return
@@ -1724,10 +1782,19 @@ const HomePage = () => {
         expires_at?: string | null
       } | null
       if (!response.ok || !data?.ok) {
+        if (response.status === 429) {
+          markPresenceRateLimited(
+            throttle,
+            response.headers.get('retry-after'),
+            Date.now(),
+          )
+          throw new Error('设备状态上报被限流，稍后重试')
+        }
         throw new Error(
           data?.message || `客户端${online ? '心跳' : '离线'}上报失败`,
         )
       }
+      markPresenceAccepted(throttle)
       if (online) await syncExpiresAt(data.expires_at)
       clearPendingPresence(pending.id)
     },
@@ -2185,7 +2252,7 @@ const HomePage = () => {
   }, [checkDesktopUpdate])
 
   useEffect(() => {
-    if (!running || !currentCode) return
+    if (!stableRunning || !currentCode) return
     const sendPresence = sendClientPresenceRef.current
     if (!sendPresence) return
     let timer: number | undefined
@@ -2208,7 +2275,7 @@ const HomePage = () => {
       window.removeEventListener('online', flushWhenOnline)
       sendPresence(false).catch(() => undefined)
     }
-  }, [currentCode, running])
+  }, [currentCode, stableRunning])
 
   // 核心停止时不应发送“在线”心跳，但仍需让网站续费结果及时反映到客户端。
   // 这里只读取轻量状态，不下载订阅；窗口重新获得焦点时立即同步，前台停留时最多等待一分钟。
@@ -2286,7 +2353,7 @@ const HomePage = () => {
   ])
 
   useEffect(() => {
-    if (!running || !currentCode || !managedAuthReady) {
+    if (!stableRunning || !currentCode || !managedAuthReady) {
       lastReportedTrafficRef.current = trafficTotalsRef.current
       return
     }
@@ -2322,7 +2389,7 @@ const HomePage = () => {
       }
       scheduler.stop()
     }
-  }, [currentCode, managedAuthReady, running])
+  }, [currentCode, managedAuthReady, stableRunning])
 
   // 每个客户端进程启动后刷新一次订阅；后续只在已连接时轻量检查服务端版本。
   // 定时检查不会盲目下载整份订阅，失败时指数退避并叠加抖动，避免惊群。
