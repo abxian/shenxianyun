@@ -1,10 +1,36 @@
 name: Sync Mihomo Changelog
 
+# 2026-09-01 停用定时触发。
+#
+# 该工作流自创建起从未成功过（可查的 12 次运行全部失败，最早 2026-06-29），
+# 每周一产生一次失败通知噪音。前 5 步都正常，只有最后的 Open pull request 失败：
+#
+#   pull request create failed: GraphQL: GitHub Actions is not permitted
+#   to create or approve pull requests (createPullRequest)
+#
+# 根因是仓库设置 Settings → Actions → General → Workflow permissions →
+# 「Allow GitHub Actions to create and approve pull requests」未勾选
+# （API 上是 can_approve_pull_request_reviews: false）。该开关独立于下面声明的
+# permissions: pull-requests: write，声明了也没用。经评估不为一行装饰性
+# changelog 去放宽这个安全开关，故停用定时触发。
+#
+# 要恢复请先满足其一，再取消下面 schedule 的注释：
+#   1) 打开该仓库开关：
+#      gh api -X PUT repos/abxian/shenxianyun/actions/permissions/workflow \
+#        -F can_approve_pull_request_reviews=true -f default_workflow_permissions=read
+#   2) 或改掉最后一步，不再调用 gh pr create（分支本来就已经 push 成功了）。
+#
+# 另有一个未修的设计隐患：scripts/sync-mihomo-version.mjs 把内核版本行插入
+# Changelog.md 最顶层 "## " 标题下，而那是最近一个「已发布」版本，等于每周
+# 追改已发布的更新日志。恢复前应改为写入未发布段。
+#
+# 遗留分支 chore/sync-mihomo-changelog (8b384370) 仍在远端，内容为
+# 「Mihomo(Meta) 内核升级至 v1.19.30」，未合并，可按需处理或删除。
 on:
   workflow_dispatch:
-  schedule:
-    # UTC+8 Monday 11:30
-    - cron: '30 3 * * 1'
+  # schedule:
+  #   # UTC+8 Monday 11:30
+  #   - cron: '30 3 * * 1'
 
 permissions:
   contents: write
