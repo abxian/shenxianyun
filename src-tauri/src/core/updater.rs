@@ -183,31 +183,30 @@ pub async fn install_update_with_fallback(app_handle: &AppHandle, expected_versi
 
     emit_update_progress(app_handle, source, "installing", None, None);
 
-    // install() 是同步阻塞调用（已知会 hang，见启动期安装路径的同款处理）。
-    // 直接在 async 命令里调用会占住 tokio 运行时，Tauri 的 IPC 随之停摆，
-    // 界面表现为「点了立即更新就假死」。必须放到阻塞线程池并设超时。
+    // install() 是同步阻塞调用。直接在 async 命令里调用会占住 tokio 运行时，
+    // Tauri 的 IPC 随之停摆，界面表现为「点了立即更新就假死」——这正是本函数
+    // 要解决的问题。放进阻塞线程池后运行时不再被占住，界面始终可响应。
     //
-    // Windows 上 NSIS 会接管进程，install() 可能永不返回——超时属于正常路径，
-    // 此时安装器已经在跑，直接按成功返回，由安装器负责重启应用。
+    // 这里刻意不加超时。tauri-plugin-updater 的 Windows install_inner 在
+    // ShellExecuteW 拉起安装器后立即 std::process::exit(0)：安装器真的接管时
+    // 本进程当场退出，await 根本不会返回。反过来说，「等了 N 秒还活着」恰恰
+    // 说明安装器没有接管，此时按成功返回是错的——调用方会立即 relaunch，
+    // 用户看到「更新完成」，实际什么都没装，且 InteractiveUpdateGuard 会在
+    // 阻塞任务仍在运行时被释放，允许第二次安装并发进来。
+    // 因此只如实等待真实结果：成功即成功，失败即失败。万一 install() 真的
+    // 卡住，代价是这条命令的 promise 一直 pending（界面停在「正在安装」，
+    // 且 guard 持续持有、不会并发重入），而不是谎报成功。
+    // 启动期静默安装路径同样把超时按失败处理（"will retry next launch"）。
     let install_task = tokio::task::spawn_blocking({
         let bytes = bytes.clone();
         let update = update.clone();
         move || update.install(&bytes)
     });
 
-    match tokio::time::timeout(std::time::Duration::from_secs(30), install_task).await {
-        Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Err(err))) => Err(anyhow!("update install failed: {err}")),
-        Ok(Err(join_err)) => Err(anyhow!("update install task panicked: {join_err}")),
-        Err(_) => {
-            // 超时不等于失败：安装器已接管，继续等待只会让界面一直卡住。
-            logging!(
-                info,
-                Type::System,
-                "Interactive install did not return within 30s; installer has taken over"
-            );
-            Ok(())
-        }
+    match install_task.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(anyhow!("update install failed: {err}")),
+        Err(join_err) => Err(anyhow!("update install task panicked: {join_err}")),
     }
 }
 

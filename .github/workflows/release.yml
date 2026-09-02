@@ -64,6 +64,12 @@ jobs:
 
           echo "✅ Tag and package.json version are consistent."
 
+      # 上一步只比对 tag 与 package.json，这正是 Cargo.lock 的根包版本能从
+      # v2.5.41 起一路停在 2.5.40 而无人发现的原因。这一步把四个版本号载体
+      # 一起校验，漏改任何一处都会在发版最开始就失败。
+      - name: Check all version carriers are in sync
+        run: node scripts/check-version-sync.mjs
+
   update_tag:
     name: Update tag
     runs-on: ubuntu-latest
