@@ -182,8 +182,33 @@ pub async fn install_update_with_fallback(app_handle: &AppHandle, expected_versi
     };
 
     emit_update_progress(app_handle, source, "installing", None, None);
-    update.install(bytes)?;
-    Ok(())
+
+    // install() 是同步阻塞调用（已知会 hang，见启动期安装路径的同款处理）。
+    // 直接在 async 命令里调用会占住 tokio 运行时，Tauri 的 IPC 随之停摆，
+    // 界面表现为「点了立即更新就假死」。必须放到阻塞线程池并设超时。
+    //
+    // Windows 上 NSIS 会接管进程，install() 可能永不返回——超时属于正常路径，
+    // 此时安装器已经在跑，直接按成功返回，由安装器负责重启应用。
+    let install_task = tokio::task::spawn_blocking({
+        let bytes = bytes.clone();
+        let update = update.clone();
+        move || update.install(&bytes)
+    });
+
+    match tokio::time::timeout(std::time::Duration::from_secs(30), install_task).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(err))) => Err(anyhow!("update install failed: {err}")),
+        Ok(Err(join_err)) => Err(anyhow!("update install task panicked: {join_err}")),
+        Err(_) => {
+            // 超时不等于失败：安装器已接管，继续等待只会让界面一直卡住。
+            logging!(
+                info,
+                Type::System,
+                "Interactive install did not return within 30s; installer has taken over"
+            );
+            Ok(())
+        }
+    }
 }
 
 pub struct SilentUpdater {
