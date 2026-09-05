@@ -70,15 +70,116 @@ if (problems.length === 0) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 第二项：系统服务（TUN 模式的前提）的 IPC 版本一致性。
+//
+// 存在的理由：prebuild 过去从 clash-verge-service-ipc 的 releases/latest 下载
+// 服务二进制，而客户端链接的是 Cargo 里钉死的那个版本。上游一发新版，安装包里
+// 的服务就比客户端新——服务能装上、IPC 也连得上，但客户端的
+// is_reinstall_service_needed() 靠版本字符串相等判断，于是恒为「协议不匹配」，
+// TUN 模式永远不可用，"修复服务" 还会重装出同一个不匹配的版本。
+// 这里把这条隐形约束变成显式门禁。
+const serviceCarriers = []
+const serviceProblems = []
+
+try {
+  const toml = read('src-tauri/Cargo.toml')
+  const start = toml.indexOf('clash_verge_service_ipc')
+  const open = start < 0 ? -1 : toml.indexOf('{', start)
+  let spec = null
+  if (open >= 0) {
+    let depth = 0
+    for (let i = open; i < toml.length; i++) {
+      if (toml[i] === '{') depth += 1
+      else if (toml[i] === '}') {
+        depth -= 1
+        if (depth === 0) {
+          spec = toml.slice(open, i + 1)
+          break
+        }
+      }
+    }
+  }
+  const declared = spec?.match(/version\s*=\s*"([^"]+)"/)?.[1]
+  if (!declared) {
+    serviceProblems.push(
+      'src-tauri/Cargo.toml: 没能提取到 clash_verge_service_ipc 的版本号',
+    )
+  } else {
+    serviceCarriers.push({ file: 'src-tauri/Cargo.toml', version: declared })
+  }
+} catch (err) {
+  serviceProblems.push(`src-tauri/Cargo.toml: 读取失败 —— ${err.message}`)
+}
+
+try {
+  const locked = read('Cargo.lock').match(
+    /name = "clash_verge_service_ipc"\s*\r?\nversion = "([^"]+)"/,
+  )?.[1]
+  if (!locked) {
+    serviceProblems.push(
+      'Cargo.lock: 没能提取到 clash_verge_service_ipc 的解析版本',
+    )
+  } else {
+    serviceCarriers.push({ file: 'Cargo.lock', version: locked })
+  }
+} catch (err) {
+  serviceProblems.push(`Cargo.lock: 读取失败 —— ${err.message}`)
+}
+
+// 版本戳只有跑过 prebuild 才有；没有就不检查，有就必须对得上。
+for (const stamp of [
+  'src-tauri/resources/.service-version',
+  'src-tauri/sidecar/.service-version',
+]) {
+  let raw
+  try {
+    raw = read(stamp)
+  } catch {
+    continue
+  }
+  try {
+    const stamped = JSON.parse(raw)?.version
+    if (!stamped) throw new Error('版本戳缺少 version 字段')
+    serviceCarriers.push({ file: stamp, version: stamped.replace(/^v/, '') })
+  } catch (err) {
+    serviceProblems.push(`${stamp}: 版本戳无法解析 —— ${err.message}`)
+  }
+}
+
+if (serviceProblems.length === 0) {
+  const serviceVersions = new Set(serviceCarriers.map((c) => c.version))
+  if (serviceVersions.size > 1) {
+    serviceProblems.push(
+      `系统服务 IPC 版本不一致：${serviceCarriers
+        .map((c) => `${c.file}=${c.version}`)
+        .join('，')}`,
+    )
+  }
+}
+
+problems.push(...serviceProblems)
+
 if (problems.length > 0) {
   console.error('✗ 版本号一致性校验未通过：')
   for (const p of problems) console.error(`  - ${p}`)
   console.error(
-    '\n发版时这四处必须一起改；Cargo.lock 改根包 clash-verge 的 version 即可。',
+    '\n发版时应用版本这四处必须一起改；Cargo.lock 改根包 clash-verge 的 version 即可。',
   )
+  if (serviceProblems.length > 0) {
+    console.error(
+      '系统服务的版本由 src-tauri/Cargo.toml 的 clash_verge_service_ipc 决定，' +
+        'prebuild 按它下载对应 tag 的服务二进制；两边不一致会导致 TUN 模式永久不可用。',
+    )
+  }
   process.exitCode = 1
 } else {
   console.log(
     `✓ 版本号一致：${found[0].version}（${found.map((f) => f.file).join('、')}）`,
+  )
+  console.log(
+    `✓ 系统服务 IPC 版本一致：${serviceCarriers[0].version}（${serviceCarriers
+      .map((c) => c.file)
+      .join('、')}）`,
   )
 }
