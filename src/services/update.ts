@@ -179,6 +179,29 @@ export const releaseUrlForVersion = (version?: string | null) => {
     : `${SHENXIANYUN_RELEASES_URL}/latest`
 }
 
+// Dufs 上的固定下载入口（始终指向当前正式版，不带版本号）。
+// 这些文件名由 NAS 同步脚本 nas-sync-release-to-dufs.py 的固定别名表决定，
+// 改名必须两边一起改，否则这里会 404。
+const DUFS_DOWNLOAD_BASE = 'https://sxy.sxnn.de:5443/sxy'
+
+/**
+ * macOS 的 Dufs 直接下载地址。
+ *
+ * macOS 不走应用内更新（用户要的是直接下载安装包），所以按 CPU 架构给出
+ * 对应的 dmg：Apple 芯片用 aarch64 包，Intel 用 x64 包。
+ * 架构取不到时返回 null，调用方回退到 GitHub Release 页面 —— 宁可让用户
+ * 自己在页面上挑，也好过猜错架构给一个装不上的包。
+ */
+export const macosDufsDownloadUrl = (arch?: string | null) => {
+  if (arch === 'x86_64') {
+    return `${DUFS_DOWNLOAD_BASE}/${encodeURIComponent('神仙云-Intel.dmg')}`
+  }
+  if (arch === 'aarch64') {
+    return `${DUFS_DOWNLOAD_BASE}/${encodeURIComponent('神仙云.dmg')}`
+  }
+  return null
+}
+
 export const downloadAndInstallWithFallback = async (
   update: Update,
   onProgress?: (progress: UpdateFallbackProgress) => void,

@@ -73,7 +73,11 @@ jobs:
   update_tag:
     name: Update tag
     runs-on: ubuntu-latest
-    needs: [release]
+    # 必须等全部上传资产的 job 结束再发布：
+    # 本 job 负责写 Release 正文（含下载直链）并 undraft，
+    # 而 release-for-linux-arm / release-for-fixed-webview2 只依赖
+    # check_tag_version，可能比它更晚完成并把正文覆盖回占位符。
+    needs: [release, release-for-linux-arm, release-for-fixed-webview2]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -103,6 +107,18 @@ jobs:
           fi
 
           cat > release.txt << EOF
+          ## 直接下载（点一下就能下）
+
+          | 系统 | 下载 |
+          | --- | --- |
+          | **Windows** 64 位（绝大多数电脑选这个） | [下载 ${{ env.VERSION }} 安装包](${{ env.DOWNLOAD_URL }}/Clash.Verge_${{ env.VERSION }}_x64-setup.exe) |
+          | **macOS** Apple 芯片（M1/M2/M3/M4） | [下载 ${{ env.VERSION }} dmg](${{ env.DOWNLOAD_URL }}/Clash.Verge_${{ env.VERSION }}_aarch64.dmg) |
+          | **macOS** Intel 芯片 | [下载 ${{ env.VERSION }} dmg](${{ env.DOWNLOAD_URL }}/Clash.Verge_${{ env.VERSION }}_x64.dmg) |
+
+          不确定自己的 Mac 是哪种芯片：点左上角苹果图标 →「关于本机」，写着 Apple M 开头的选第二行，写着 Intel 的选第三行。
+
+          其余架构与 Linux 安装包见下方完整列表。
+
           $UPDATE_LOGS
 
           ## 下载地址
@@ -439,7 +455,7 @@ jobs:
         with:
           tag_name: v${{env.VERSION}}
           name: '神仙云 PC v${{env.VERSION}}'
-          body: 'See release notes for detailed changelog.'
+          # 不设置 body：正文由 update_tag 统一写入，避免覆盖下载直链
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
           prerelease: ${{ contains(github.ref_name, '-rc') }}
@@ -556,7 +572,7 @@ jobs:
         with:
           tag_name: v${{steps.build.outputs.appVersion}}
           name: '神仙云 PC v${{steps.build.outputs.appVersion}}'
-          body: 'See release notes for detailed changelog.'
+          # 不设置 body：正文由 update_tag 统一写入，避免覆盖下载直链
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
           prerelease: ${{ contains(github.ref_name, '-rc') }}

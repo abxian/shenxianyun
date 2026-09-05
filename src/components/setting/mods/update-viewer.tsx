@@ -11,10 +11,12 @@ import rehypeRaw from 'rehype-raw'
 import { BaseDialog, DialogRef } from '@/components/base'
 import { useUpdate } from '@/hooks/use-update'
 import { portableFlag } from '@/pages/_layout'
+import { getAppArch } from '@/services/cmds'
 import { showNotice } from '@/services/notice-service'
 import { useSetUpdateState, useUpdateState } from '@/services/states'
 import {
   downloadAndInstallWithFallback,
+  macosDufsDownloadUrl,
   releaseUrlForVersion,
 } from '@/services/update'
 import getSystem from '@/utils/get-system'
@@ -157,8 +159,13 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
       showNotice.error('settings.modals.update.messages.breakChangeError')
       return
     }
+    // macOS 不走应用内更新，直接把 Dufs 上的 dmg 交给系统下载。
+    // 架构取不到或不认识时回退到 GitHub Release 页面，让用户自己挑，
+    // 而不是猜一个架构给出装不上的包。
     if (getSystem() === 'macos') {
-      await openUrl(releaseUrlForVersion(updateInfo.version))
+      const arch = await getAppArch().catch(() => null)
+      const dufsUrl = macosDufsDownloadUrl(arch)
+      await openUrl(dufsUrl ?? releaseUrlForVersion(updateInfo.version))
       return
     }
     if (updateState) return
