@@ -2530,6 +2530,10 @@ const HomePage = () => {
 
     const run = async (refreshAtStartup = false) => {
       if (cancelled) return
+      if (refreshAtStartup && startupRefreshCompletedRef.current) {
+        if (running) schedule()
+        return
+      }
       if (updateInFlightRef.current || busy) {
         schedule(refreshAtStartup)
         return
@@ -3272,6 +3276,12 @@ const HomePage = () => {
       transaction = await activateCode(value, 3, updatePhase)
       updatePhase('starting')
       await startImportedProfile(transaction.activate)
+      if (startAfterImport) {
+        // Establish connectivity before committing: a start failure can still roll back.
+        await toggleSystemProxy(true)
+        await invalidateProxyState()
+        await refreshAll()
+      }
       await transaction.commit()
       startupRefreshCompletedRef.current = true
       try {
@@ -3279,12 +3289,7 @@ const HomePage = () => {
       } catch {
         /* memory completion remains */
       }
-      if (startAfterImport) {
-        await toggleSystemProxy(true)
-        await invalidateProxyState()
-        await refreshAll()
-        setCodeDialogOpen(false)
-      }
+      if (startAfterImport) setCodeDialogOpen(false)
       setCode('')
       updatePhase('success')
       setCodeImportMessage(
