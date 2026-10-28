@@ -1,7 +1,14 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "identifier": "io.github.clash-verge-rev.clash-verge-rev",
-  "productName": "Clash Verge",
+  "identifier": "de.sxnn.shenxianyun.desktop",
+  "productName": "神仙云",
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["shenxianyun"]
+      }
+    }
+  },
   "bundle": {
     "targets": ["app", "dmg"],
     "macOS": {

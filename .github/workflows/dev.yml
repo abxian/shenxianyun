@@ -100,6 +100,12 @@ jobs:
         if: github.event.inputs[matrix.input] == 'true'
         uses: dtolnay/rust-toolchain@1.95.0
 
+      - name: Check macOS instance ownership policy
+        if: matrix.id == 'macos-aarch64' && github.event.inputs[matrix.input] == 'true'
+        run: |
+          rustc --edition 2024 --test src-tauri/src/utils/macos_instance.rs -o "$RUNNER_TEMP/macos-instance-tests"
+          "$RUNNER_TEMP/macos-instance-tests"
+
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:

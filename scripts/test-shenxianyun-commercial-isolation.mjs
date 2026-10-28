@@ -5,6 +5,22 @@ import test from 'node:test'
 const read = (relativePath) =>
   readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8')
 
+test('Mac install identity is distinct while legacy data and core service remain compatible', () => {
+  const mac = JSON.parse(read('src-tauri/tauri.macos.conf.json'))
+  const base = JSON.parse(read('src-tauri/tauri.conf.json'))
+  const dirs = read('src-tauri/src/utils/dirs.rs')
+  const helper = read('src-tauri/packages/macos/info_merge.plist')
+  assert.equal(mac.productName, '神仙云')
+  assert.equal(mac.identifier, 'de.sxnn.shenxianyun.desktop')
+  assert.notEqual(mac.identifier, base.identifier)
+  assert.deepEqual(mac.plugins['deep-link'].desktop.schemes, ['shenxianyun'])
+  assert.match(
+    dirs,
+    /APP_ID: &str = "io\.github\.clash-verge-rev\.clash-verge-rev"/,
+  )
+  assert.match(helper, /io\.github\.clash-verge-rev\.clash-verge-rev\.service/)
+})
+
 test('keeps Shenxianyun UI, API discovery, and updater channels isolated', () => {
   const html = read('src/index.html')
   const windowSource = read('src-tauri/src/utils/resolve/window.rs')

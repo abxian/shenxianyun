@@ -230,7 +230,13 @@ mod app_init {
 }
 
 pub fn run() {
-    if app_init::init_singleton_check().is_err() {
+    if let Err(error) = app_init::init_singleton_check() {
+        #[cfg(target_os = "macos")]
+        if error.is::<utils::macos_instance::ExistingClientConflict>() {
+            utils::macos_instance::show_conflict_notice();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = error;
         return;
     }
 
