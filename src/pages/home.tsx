@@ -1623,9 +1623,26 @@ const HomePage = () => {
         options?.suppressValidationNotice ?? false
       const auth = managedAuthRef.current
       if (!auth || auth.profileUid !== current?.uid) return 'unmanaged'
+      const commitAuth = async (next: ManagedAuth) => {
+        assertRequestActive(options?.signal)
+        if (managedAuthRef.current !== auth)
+          throw new Error('提取码已变化，已取消旧订阅更新')
+        if (options?.background) {
+          refreshApplyInFlightRef.current = true
+          setBusy(true)
+        }
+        try {
+          await persistManagedAuth(next)
+        } finally {
+          if (options?.background) {
+            refreshApplyInFlightRef.current = false
+            setBusy(false)
+          }
+        }
+      }
       if (auth.detached && !force) {
         if (remoteVersion > auth.updateVersion) {
-          await persistManagedAuth({ ...auth, updateVersion: remoteVersion })
+          await commitAuth({ ...auth, updateVersion: remoteVersion })
         }
         setStatus('当前订阅已在本地编辑，已停止远程覆盖')
         return 'managed-detached'
@@ -1637,8 +1654,9 @@ const HomePage = () => {
         options?.signal,
       )
       const localHash = await hashManagedContent(localContent)
+      assertRequestActive(options?.signal)
       if (!force && auth.contentHash && localHash !== auth.contentHash) {
-        await persistManagedAuth({
+        await commitAuth({
           ...auth,
           detached: true,
           updateVersion: Math.max(auth.updateVersion, remoteVersion),
@@ -2527,7 +2545,22 @@ const HomePage = () => {
       try {
         const state = await updateState(currentCode, signal)
         assertRequestActive(signal)
-        await syncExpiresAt(state.expires_at)
+        // Expiry metadata is also a write: retain ownership until persistence
+        // finishes so a foreground import cannot be overwritten by this check.
+        if (
+          state.expires_at !== undefined &&
+          (state.expires_at?.trim() || '') !== expiresAt
+        ) {
+          refreshApplyInFlightRef.current = true
+          setBusy(true)
+          try {
+            await syncExpiresAt(state.expires_at)
+          } finally {
+            refreshApplyInFlightRef.current = false
+            setBusy(false)
+          }
+        }
+        assertRequestActive(signal)
         const remoteVersion = Number(state.update_version || 0)
         const localVersion = Number(
           localStorage.getItem(CODE_UPDATE_VERSION_STORAGE_KEY) || 0,
