@@ -42,3 +42,5 @@
 `scripts/test-automatic-policy.py --deps target/debug/deps --core src-tauri/sidecar/verge-mihomo-aarch64-apple-darwin`：需要rustc、已编译serde_yaml_ng rlib、Python3和当前核心；5个纯Rust策略测试通过，并用当前Mihomo v1.19.30验证准确生产配置。仅localhost假SOCKS节点、临时目录、随机控制端口、TUN关闭，无系统代理变更/真实订阅/公网探测；A故障/B恢复时实际内核自动组从A切到B通过。只在模拟fixture中把健康检查URL/间隔改为本地测试参数，生产仍用上述60秒/5秒。finally停止自己的临时核心/服务器并清理；异常时不影响已安装客户端。Mac开发包在上传前执行同一门禁。
 
 旧Development40692001850因用户追加UI已取消，不交付该构件；4d3bb78d的Frontend40692053172和Clippy40692019569通过，但最终联合版本必须对准确新提交重新构建/检查。243与254一起交独立测试包，Android和原生Apple保持冻结约束；实际首次启动、在线订阅更新、视觉和真实网络切换等待用户测试。UI回退可只撤后续UI提交回4d3bb78d；完整包恢复fix240。
+
+最后收口：更新入口也移入高级设置，首页不再常驻新版本横幅；当前版本号改为读取构建时package.json，避免仍上报/显示硬编码2.5.38。客户端类型标识保持兼容，不更改服务端接口。

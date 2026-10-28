@@ -166,6 +166,7 @@ import {
   planSubscriptionRefresh,
   type SubscriptionRefreshReason,
 } from '@/utils/subscription-refresh'
+import { version as desktopBuildVersion } from '@root/package.json'
 
 const CODE_STORAGE_KEY = 'shenxianyun.accessCode'
 const CODE_EXPIRES_STORAGE_KEY = 'shenxianyun.accessExpiresAt'
@@ -300,8 +301,8 @@ const buildExpiredProfileYaml = () =>
     // 占位期间仍能探测到续费并自动恢复；其余流量全部走不可达的占位节点（无法上网）。
     rules: [...officialDirectRules(), 'MATCH,节点选择'],
   })
-const DESKTOP_VERSION = '2.5.38'
-const CLIENT_UA = 'JC116-Shenxianyun-Windows/2.5.38'
+const DESKTOP_VERSION = desktopBuildVersion
+const CLIENT_UA = `JC116-Shenxianyun-Windows/${DESKTOP_VERSION}`
 const DESKTOP_PLATFORM = getSystem()
 const LIGHT_SURFACE_TEXT_COLOR = '#182033'
 const fieldSx = {
@@ -4334,51 +4335,6 @@ const HomePage = () => {
             flexShrink: 0,
           }}
         >
-          {showConnectionOptions && updateInfo?.available && (
-            <Box
-              sx={{
-                borderRadius: '14px',
-                px: 1.5,
-                py: 1,
-                display: 'flex',
-                alignItems: 'center',
-                gap: 1.5,
-                flexWrap: 'wrap',
-                border: '1px solid rgba(41,201,156,.55)',
-                bgcolor: 'rgba(41,201,156,.16)',
-              }}
-            >
-              <BoltRounded sx={{ color: '#28c99c' }} />
-              <Box sx={{ flex: 1, minWidth: 0 }}>
-                <Typography sx={{ fontWeight: 850, color: '#eafff8' }}>
-                  发现新版本 v{updateInfo.version}
-                </Typography>
-                <Typography
-                  sx={{ fontSize: 12, color: 'rgba(214,240,250,.82)' }}
-                >
-                  {isMacOS
-                    ? '点击前往下载页，手动下载安装新版本。'
-                    : '点击「立即更新」自动下载并安装，完成后自动重启。'}
-                </Typography>
-              </Box>
-              <Button
-                variant="contained"
-                disabled={updating}
-                onClick={doUpdate}
-                sx={{
-                  bgcolor: '#28c99c',
-                  fontWeight: 800,
-                  '&:hover': { bgcolor: '#22b489' },
-                }}
-              >
-                {isMacOS
-                  ? '前往下载'
-                  : updating
-                    ? `更新中 ${updPercent}%`
-                    : '立即更新'}
-              </Button>
-            </Box>
-          )}
           {!showConnectionOptions ? (
             <Paper
               elevation={0}
@@ -4854,6 +4810,52 @@ const HomePage = () => {
             </DialogTitle>
             <DialogContent sx={{ pt: 1.5 }}>
               <Stack spacing={1.25}>
+                {updateInfo?.available && (
+                  <Box
+                    sx={{
+                      borderRadius: '14px',
+                      px: 1.5,
+                      py: 1,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 1.5,
+                      flexWrap: 'wrap',
+                      border: '1px solid rgba(41,201,156,.55)',
+                      bgcolor: 'rgba(41,201,156,.16)',
+                    }}
+                  >
+                    <BoltRounded sx={{ color: '#28c99c' }} />
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography sx={{ fontWeight: 850, color: '#eafff8' }}>
+                        发现新版本 v{updateInfo.version}
+                      </Typography>
+                      <Typography
+                        sx={{ fontSize: 12, color: 'rgba(214,240,250,.82)' }}
+                      >
+                        {isMacOS
+                          ? '点击前往下载页，手动下载安装新版本。'
+                          : '点击「立即更新」自动下载并安装，完成后自动重启。'}
+                      </Typography>
+                    </Box>
+                    <Button
+                      variant="contained"
+                      disabled={updating}
+                      onClick={doUpdate}
+                      sx={{
+                        bgcolor: '#28c99c',
+                        fontWeight: 800,
+                        '&:hover': { bgcolor: '#22b489' },
+                      }}
+                    >
+                      {isMacOS
+                        ? '前往下载'
+                        : updating
+                          ? `更新中 ${updPercent}%`
+                          : '立即更新'}
+                    </Button>
+                  </Box>
+                )}
+
                 {clientAccountState && (
                   <Paper
                     elevation={0}
