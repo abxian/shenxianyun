@@ -1,3 +1,4 @@
+mod automatic;
 mod chain;
 pub mod field;
 mod merge;
@@ -643,6 +644,7 @@ pub async fn enhance() -> Result<(Mapping, HashSet<String>, HashMap<String, Resu
     let mut config = apply_builtin_scripts(config, clash_core, enable_builtin).await;
 
     config = cleanup_proxy_groups(config);
+    automatic::ensure_automatic_selection(&mut config);
 
     config = use_tun(config, enable_tun);
     config = use_sort(config);

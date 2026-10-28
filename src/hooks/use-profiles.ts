@@ -10,6 +10,7 @@ import {
 } from '@/services/cmds'
 import { queryClient } from '@/services/query-client'
 import { debugLog } from '@/utils/debug'
+import { isAutomaticNode } from '@/utils/home-node-order'
 
 export const useProfiles = () => {
   const {
@@ -139,6 +140,13 @@ export const useProfiles = () => {
 
         const { type, name, now } = group
         const savedProxy = selectedMap[name]
+        // Restoring a measured automatic member as a manual override prevents
+        // fresh latency selection. Persist the parent selector's auto choice only.
+        if (isAutomaticNode(group)) {
+          if (savedProxy != null) hasChange = true
+          continue
+        }
+
         const availableProxies = Array.isArray(group.all) ? group.all : []
 
         if (!selectableTypes.has(type)) {

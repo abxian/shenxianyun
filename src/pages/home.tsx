@@ -12,7 +12,6 @@ import {
   LanguageRounded,
   NetworkCheckRounded,
   OpenInBrowserRounded,
-  PowerSettingsNewRounded,
   RefreshRounded,
   RestartAltRounded,
   RouterRounded,
@@ -58,6 +57,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getBaseConfig, getVersion } from 'tauri-plugin-mihomo-api'
 
 import { BasePage, type DialogRef } from '@/components/base'
+import { GlassPowerButton } from '@/components/home/glass-power-button'
+import { NodeSelectionPanel } from '@/components/home/node-selection-panel'
 import { WebsiteTestViewer } from '@/components/home/website-test-viewer'
 import { EditorViewer } from '@/components/profile/editor-viewer'
 import { ClashPortViewer } from '@/components/setting/mods/clash-port-viewer'
@@ -158,6 +159,8 @@ import {
 } from '@/services/update'
 import { VISIBLE_APP_NAME } from '@/services/visible-brand'
 import getSystem from '@/utils/get-system'
+import { isAutomaticNode, sortHomeNodes } from '@/utils/home-node-order'
+import { homeStatusMessage } from '@/utils/home-status'
 import { prepareSubscriptionContent } from '@/utils/subscription-content'
 import {
   planSubscriptionRefresh,
@@ -369,30 +372,6 @@ const glassDialogPaperSx = {
   },
   '& .MuiToggleButton-root:not(.Mui-selected)': {
     color: '#4356c4',
-  },
-}
-
-const nodeMenuPaperSx = {
-  color: LIGHT_SURFACE_TEXT_COLOR,
-  colorScheme: 'light',
-  borderRadius: '14px',
-  border: '1px solid rgba(255,255,255,.6)',
-  background:
-    'linear-gradient(160deg, rgba(255,255,255,.96), rgba(233,236,252,.94))',
-  backdropFilter: 'blur(22px)',
-  boxShadow: '0 18px 44px rgba(90,110,220,.24)',
-  '& .MuiMenuItem-root': {
-    color: LIGHT_SURFACE_TEXT_COLOR,
-    '&:hover, &.Mui-focusVisible': {
-      bgcolor: 'rgba(95,123,240,.1)',
-    },
-    '&.Mui-selected': {
-      color: LIGHT_SURFACE_TEXT_COLOR,
-      bgcolor: 'rgba(95,123,240,.16)',
-    },
-    '&.Mui-selected:hover, &.Mui-selected.Mui-focusVisible': {
-      bgcolor: 'rgba(95,123,240,.22)',
-    },
   },
 }
 
@@ -781,14 +760,6 @@ const getNodeDelay = (proxy: IProxyItem, groupName = '') => {
   return proxy.history?.slice(-1)[0]?.delay ?? -1
 }
 
-const formatNodeLabel = (proxy: IProxyItem, groupName = '') => {
-  const delay = getNodeDelay(proxy, groupName)
-  if (delay === -2) return `${proxy.name} · 测试中`
-  if (delay === 0 || delay >= DELAY_TIMEOUT) return `${proxy.name} · 超时`
-  if (delay > 0 && delay < 100000) return `${proxy.name} · ${delay}ms`
-  return proxy.name
-}
-
 const delayRank = (proxy: IProxyItem, groupName = '') => {
   const delay = getNodeDelay(proxy, groupName)
   if (delay > 0 && delay < DELAY_TIMEOUT) return delay
@@ -976,11 +947,12 @@ const HomePage = () => {
       : ruleGroup
   const nodes = useMemo(() => {
     void delaySortTick
-    return [...(nodeGroup?.all || [])]
-      .filter((proxy) => !['DIRECT', 'REJECT'].includes(proxy.name))
-      .sort(
-        (a, b) => delayRank(a, nodeGroup?.name) - delayRank(b, nodeGroup?.name),
-      )
+    return sortHomeNodes(
+      (nodeGroup?.all || []).filter(
+        (proxy) => !['DIRECT', 'REJECT'].includes(proxy.name),
+      ),
+      (node) => delayRank(node, nodeGroup?.name),
+    )
   }, [nodeGroup, delaySortTick])
 
   const selectedNode = useMemo(() => {
@@ -1050,7 +1022,6 @@ const HomePage = () => {
       : proxyStateMismatch
         ? { label: '系统代理异常', color: 'warning', variant: 'filled' }
         : { label: '系统代理关闭', color: 'default', variant: 'outlined' }
-  const activeProfileName = current?.name || profiles?.current || '未导入订阅'
   const currentCode =
     savedCode &&
     current?.uid &&
@@ -1065,7 +1036,7 @@ const HomePage = () => {
   const externalControllerOn = verge?.enable_external_controller ?? false
   const dnsOverwriteOn = verge?.enable_dns_settings ?? false
   const proxyGuardOn = verge?.enable_proxy_guard ?? true
-  const powerHint = running ? '已启动，点击停止' : '还没有启动，点击启动'
+  const importantStatus = homeStatusMessage(status)
   const nodeSelectLabel = mode === 'global' ? '选择全局节点' : '选择节点'
   const codeDialogTitle =
     codeImportPhase === 'checking'
@@ -4357,9 +4328,10 @@ const HomePage = () => {
         <Stack
           spacing={1}
           sx={{
-            width: 'min(735px, 100%)',
-            maxHeight: '100%',
-            minHeight: 0,
+            width: '100%',
+            height: '100%',
+            minHeight: 360,
+            flexShrink: 0,
           }}
         >
           {showConnectionOptions && updateInfo?.available && (
@@ -4408,68 +4380,89 @@ const HomePage = () => {
             </Box>
           )}
           {!showConnectionOptions ? (
-            <Stack
-              spacing={3}
+            <Paper
+              elevation={0}
               sx={{
-                width: 'min(440px, 100%)',
-                alignSelf: 'center',
-                mt: 6,
-                p: 3,
-                borderRadius: 6,
-                bgcolor: 'rgba(255,255,255,.68)',
+                flex: 1,
+                minHeight: 300,
+                display: 'grid',
+                gridTemplateColumns: {
+                  xs: '1fr',
+                  sm: 'minmax(180px, .9fr) minmax(220px, 1.1fr)',
+                },
+                alignContent: 'center',
+                alignItems: 'center',
+                gap: 3,
+                p: { xs: 2.5, sm: 4 },
+                borderRadius: '26px',
+                border: '1px solid rgba(255,255,255,.6)',
+                background:
+                  'linear-gradient(140deg, rgba(255,255,255,.28), rgba(255,255,255,.1))',
+                backdropFilter: 'blur(22px)',
+                boxShadow:
+                  'inset 0 1px 0 rgba(255,255,255,.7), 0 18px 48px rgba(80,100,190,.16)',
               }}
             >
-              <Typography variant="h4" align="center" sx={{ fontWeight: 800 }}>
-                神仙云
-              </Typography>
-              {!savedCode ? (
-                <TextField
-                  label="输入提取码"
-                  value={code}
-                  disabled={busy}
-                  sx={fieldSx}
-                  onChange={(event) => setCode(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' && !busy) void importByCode(true)
-                  }}
+              <Box sx={{ display: 'grid', placeItems: 'center' }}>
+                <GlassPowerButton
+                  prominent
+                  running={running}
+                  busy={busy}
+                  disabled={!savedCode && !code.trim()}
+                  onClick={() =>
+                    savedCode || running ? togglePower() : importByCode(true)
+                  }
                 />
-              ) : (
-                <Button
-                  disabled={busy || running}
-                  startIcon={<KeyRounded />}
-                  onClick={() => {
-                    setCode('')
-                    setCodeImportPhase('input')
-                    setCodeImportMessage('')
-                    setCodeDialogOpen(true)
-                  }}
-                >
-                  切换提取码
-                </Button>
-              )}
-              <Button
-                variant="contained"
-                size="large"
-                disabled={busy || (!savedCode && !code.trim())}
-                startIcon={
-                  busy ? (
-                    <CircularProgress size={20} color="inherit" />
-                  ) : (
-                    <PowerSettingsNewRounded />
-                  )
-                }
-                onClick={() =>
-                  savedCode || running ? togglePower() : importByCode(true)
-                }
+              </Box>
+              <Stack
+                spacing={2}
+                sx={{
+                  minWidth: 0,
+                  width: '100%',
+                  maxWidth: 420,
+                  justifySelf: 'center',
+                }}
               >
-                {busy ? '处理中…' : running ? '停止' : '启动'}
-              </Button>
-              {status && (
-                <Alert severity={status.includes('失败') ? 'error' : 'info'}>
-                  {status}
-                </Alert>
-              )}
-            </Stack>
+                <Typography
+                  variant="h4"
+                  sx={{ fontWeight: 800, color: '#33406e' }}
+                >
+                  神仙云
+                </Typography>
+                {!savedCode ? (
+                  <TextField
+                    fullWidth
+                    label="输入提取码"
+                    value={code}
+                    disabled={busy}
+                    sx={fieldSx}
+                    onChange={(event) => setCode(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && !busy)
+                        void importByCode(true)
+                    }}
+                  />
+                ) : (
+                  <Button
+                    variant="outlined"
+                    disabled={busy || running}
+                    startIcon={<KeyRounded />}
+                    sx={{ ...outlineButtonSx, py: 1.2 }}
+                    onClick={() => {
+                      setCode('')
+                      setCodeImportPhase('input')
+                      setCodeImportMessage('')
+                      setCodeDialogOpen(true)
+                    }}
+                  >
+                    切换提取码
+                  </Button>
+                )}
+                {importantStatus && (
+                  <Alert severity="warning">{importantStatus}</Alert>
+                )}
+              </Stack>
+            </Paper>
           ) : (
             <>
               <Stack
@@ -4491,15 +4484,6 @@ const HomePage = () => {
                     }}
                   >
                     神仙云
-                  </Typography>
-                  <Typography
-                    sx={{
-                      color: 'rgba(255,255,255,.92)',
-                      fontSize: 12,
-                      textShadow: '0 1px 8px rgba(90,110,220,.35)',
-                    }}
-                  >
-                    提取码订阅 · 节点选择 · 一键连接
                   </Typography>
                 </Box>
                 <Stack
@@ -4553,6 +4537,9 @@ const HomePage = () => {
                 sx={{
                   borderRadius: '26px',
                   p: 1.3,
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
                   border: '1px solid rgba(255,255,255,.6)',
                   bgcolor: 'rgba(255,255,255,.3)',
                   boxShadow:
@@ -4560,6 +4547,7 @@ const HomePage = () => {
                   backdropFilter: 'blur(22px)',
                   overflow: 'hidden',
                   position: 'relative',
+                  '& .MuiButton-outlined': outlineButtonSx,
                   '&:before': {
                     content: '""',
                     position: 'absolute',
@@ -4572,135 +4560,36 @@ const HomePage = () => {
                 }}
               >
                 <Stack
-                  direction="row"
+                  direction={{ xs: 'column', sm: 'row' }}
                   spacing={1.15}
-                  sx={{ position: 'relative', alignItems: 'stretch' }}
+                  sx={{
+                    position: 'relative',
+                    alignItems: 'stretch',
+                    flex: 1,
+                    minHeight: 0,
+                  }}
                 >
-                  <Stack
-                    spacing={1.25}
+                  <Box
                     sx={{
-                      width: 180,
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      py: 0,
+                      width: { xs: '100%', sm: 160 },
+                      flexShrink: 0,
+                      display: 'grid',
+                      placeItems: 'center',
                     }}
                   >
-                    <Box
-                      sx={{
-                        width: 146,
-                        height: 146,
-                        borderRadius: '50%',
-                        display: 'grid',
-                        placeItems: 'center',
-                        background: running
-                          ? 'radial-gradient(circle, rgba(70,205,150,.3), rgba(70,205,150,.1) 62%, transparent 63%)'
-                          : 'radial-gradient(circle, rgba(255,255,255,.55), rgba(140,160,245,.18) 62%, transparent 63%)',
-                        border: '1px dashed rgba(255,255,255,.65)',
-                        boxShadow: running
-                          ? '0 0 42px rgba(70,205,150,.28)'
-                          : '0 0 42px rgba(130,150,245,.35)',
-                      }}
-                    >
-                      <Button
-                        disabled={busy}
-                        onClick={togglePower}
-                        sx={{
-                          width: 116,
-                          height: 116,
-                          borderRadius: '50%',
-                          fontSize: 20,
-                          fontWeight: 900,
-                          color: 'white',
-                          background: running
-                            ? 'linear-gradient(135deg, #35c58f, #3f9ff2)'
-                            : 'linear-gradient(145deg, #8ea6f6 0%, #5f7bf0 55%, #4f66e8 100%)',
-                          boxShadow: running
-                            ? '0 18px 36px rgba(63,159,242,.35)'
-                            : '0 18px 38px rgba(95,123,240,.45), inset 0 2px 6px rgba(255,255,255,.35)',
-                          '&:hover': {
-                            background: running
-                              ? 'linear-gradient(135deg, #2eb582, #368fe0)'
-                              : 'linear-gradient(145deg, #80a0f5 0%, #536fee 55%, #4159e0 100%)',
-                          },
-                        }}
-                      >
-                        <Stack spacing={0.6} sx={{ alignItems: 'center' }}>
-                          <PowerSettingsNewRounded sx={{ fontSize: 34 }} />
-                          <span>{running ? '停止' : '启动'}</span>
-                        </Stack>
-                      </Button>
-                    </Box>
-
-                    <Stack
-                      spacing={0.7}
-                      sx={{ alignItems: 'center', width: '100%' }}
-                    >
-                      <Chip
-                        size="small"
-                        color={running ? 'success' : 'default'}
-                        variant={running ? 'filled' : 'outlined'}
-                        label={powerHint}
-                        sx={{
-                          fontWeight: 800,
-                          ...(running
-                            ? {}
-                            : {
-                                bgcolor: 'rgba(255,255,255,.42)',
-                                border: '1px solid rgba(255,255,255,.65)',
-                                color: '#33406e',
-                              }),
-                        }}
-                      />
-                      <Typography
-                        sx={{
-                          fontSize: 13,
-                          color: '#33406e',
-                          fontWeight: 700,
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 0.5,
-                        }}
-                      >
-                        {savedCode ? '🛡️ 提取码已绑定' : activeProfileName}
-                      </Typography>
-                      {expiresAt && (
-                        <Chip
-                          size="small"
-                          color={codeExpired ? 'error' : 'default'}
-                          variant="outlined"
-                          label={
-                            codeExpired ? '提取码已过期' : `到期 ${expiresAt}`
-                          }
-                        />
-                      )}
-                      {clientAccountState?.showUsage && (
-                        <Stack spacing={0.35} sx={{ alignItems: 'center' }}>
-                          <Typography sx={{ fontSize: 11, color: '#4d5a82' }}>
-                            在线 {clientAccountState.onlineDevices}/
-                            {clientAccountState.onlineLimit || '不限'} · 绑定{' '}
-                            {clientAccountState.boundDevices}/
-                            {clientAccountState.boundLimit || '不限'}
-                          </Typography>
-                          <Typography sx={{ fontSize: 11, color: '#4d5a82' }}>
-                            今日 {formatUsageBytes(clientAccountState.dayUsed)}/
-                            {clientAccountState.dayLimit
-                              ? formatUsageBytes(clientAccountState.dayLimit)
-                              : '不限'}{' '}
-                            · 本月{' '}
-                            {formatUsageBytes(clientAccountState.monthUsed)}/
-                            {clientAccountState.monthLimit
-                              ? formatUsageBytes(clientAccountState.monthLimit)
-                              : '不限'}
-                          </Typography>
-                        </Stack>
-                      )}
-                    </Stack>
-                  </Stack>
+                    <GlassPowerButton
+                      running={running}
+                      busy={busy}
+                      onClick={togglePower}
+                    />
+                  </Box>
 
                   <Box
                     sx={{
                       flex: 1,
                       minWidth: 0,
+                      minHeight: 0,
+                      display: 'flex',
                       borderRadius: '20px',
                       p: 1.1,
                       border: '1px solid rgba(255,255,255,.6)',
@@ -4714,6 +4603,9 @@ const HomePage = () => {
                     <Stack
                       spacing={1}
                       sx={{
+                        flex: 1,
+                        minWidth: 0,
+                        minHeight: 0,
                         '& .MuiButton-outlined': outlineButtonSx,
                         '& .MuiButton-contained.Mui-disabled': {
                           color: 'rgba(255,255,255,.56)',
@@ -4749,249 +4641,194 @@ const HomePage = () => {
                         <ToggleButton value="global">全局模式</ToggleButton>
                       </ToggleButtonGroup>
 
-                      <Stack
-                        direction={{ xs: 'column', sm: 'row' }}
-                        spacing={1}
-                      >
-                        <FormControl fullWidth size="small">
-                          <InputLabel>{nodeSelectLabel}</InputLabel>
-                          <Select
-                            sx={fieldSx}
-                            label={nodeSelectLabel}
-                            value={selectedNode}
-                            onChange={(event) => changeNode(event.target.value)}
-                            disabled={!nodeGroup || nodes.length === 0}
-                            MenuProps={{
-                              slotProps: {
-                                paper: {
-                                  sx: nodeMenuPaperSx,
-                                },
-                              },
-                            }}
-                          >
-                            {nodes.map((node) => (
-                              <MenuItem key={node.name} value={node.name}>
-                                {formatNodeLabel(node, nodeGroup?.name)}
-                              </MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                        <Button
-                          variant="outlined"
-                          startIcon={<SpeedRounded />}
-                          disabled={busy || delayTesting || nodes.length === 0}
-                          onClick={testNodeDelay}
-                          sx={{ minWidth: 104 }}
-                        >
-                          {delayTesting ? '测试中' : '测试连通性'}
-                        </Button>
-                      </Stack>
-
-                      <Stack
-                        direction="row"
-                        spacing={1}
-                        useFlexGap
-                        sx={{ flexWrap: 'wrap' }}
-                      >
-                        <Button
-                          variant="contained"
-                          startIcon={<KeyRounded />}
-                          disabled={busy}
-                          onClick={() => {
-                            setCode('')
-                            setCodeImportPhase('input')
-                            setCodeImportMessage('')
-                            setCodeDialogOpen(true)
-                          }}
-                          sx={{
-                            flex: '1 1 132px',
-                            background:
-                              'linear-gradient(135deg, #7f97f4, #5f7bf0)',
-                            color: '#fff',
-                            fontWeight: 800,
-                            boxShadow: '0 8px 20px rgba(95,123,240,.4)',
-                            '&:hover': {
-                              background:
-                                'linear-gradient(135deg, #6f8af2, #4f66e8)',
-                            },
-                          }}
-                        >
-                          {savedCode ? '切换提取码' : '导入订阅'}
-                        </Button>
-                        {!isTunModeAvailable && (
-                          <Button
-                            variant="outlined"
-                            startIcon={<BuildRounded />}
-                            disabled={busy}
-                            sx={{ flex: '1 1 110px' }}
-                            onClick={async () => {
-                              setBusy(true)
-                              setStatus('正在安装 TUN 服务...')
-                              try {
-                                await installService()
-                                await restartCore()
-                                await mutateSystemState()
-                                setStatus('TUN 服务已安装')
-                              } catch (error) {
-                                setStatus(
-                                  error instanceof Error
-                                    ? error.message
-                                    : String(error),
-                                )
-                              } finally {
-                                setBusy(false)
-                              }
-                            }}
-                          >
-                            安装 TUN
-                          </Button>
-                        )}
-                        {isTunModeAvailable && !tunOn && (
-                          <Button
-                            variant="outlined"
-                            color="success"
-                            startIcon={<LanRounded />}
-                            disabled={busy}
-                            sx={{ flex: '1 1 110px' }}
-                            onClick={async () => {
-                              setBusy(true)
-                              setStatus('正在开启 TUN...')
-                              try {
-                                await patchVerge({ enable_tun_mode: true })
-                                await mutateSystemState()
-                                await refreshAll()
-                                setStatus('TUN 已开启')
-                              } catch (error) {
-                                setStatus(
-                                  error instanceof Error
-                                    ? error.message
-                                    : String(error),
-                                )
-                              } finally {
-                                setBusy(false)
-                              }
-                            }}
-                          >
-                            开启 TUN
-                          </Button>
-                        )}
-                        {tunOn && (
-                          <Button
-                            variant="outlined"
-                            color="warning"
-                            startIcon={<LanRounded />}
-                            disabled={busy}
-                            sx={{ flex: '1 1 110px' }}
-                            onClick={async () => {
-                              setBusy(true)
-                              setStatus('正在关闭 TUN...')
-                              try {
-                                await patchVerge({ enable_tun_mode: false })
-                                await mutateSystemState()
-                                await refreshAll()
-                                setStatus('TUN 已关闭')
-                              } catch (error) {
-                                setStatus(
-                                  error instanceof Error
-                                    ? error.message
-                                    : String(error),
-                                )
-                              } finally {
-                                setBusy(false)
-                              }
-                            }}
-                          >
-                            关闭 TUN
-                          </Button>
-                        )}
-                        <Button
-                          variant="outlined"
-                          startIcon={<CloudSyncRounded />}
-                          disabled={busy}
-                          onClick={() => updateCurrentSubscription()}
-                          sx={{ flex: '1 1 116px' }}
-                        >
-                          更新订阅
-                        </Button>
-                        <Button
-                          variant="outlined"
-                          startIcon={<SettingsRounded />}
-                          disabled={busy}
-                          onClick={() => setAdvancedOpen(true)}
-                          sx={{ flex: '1 1 132px' }}
-                        >
-                          高级用户设置
-                        </Button>
-                        <Button
-                          variant="outlined"
-                          startIcon={<ShoppingCartRounded />}
-                          sx={{ flex: '1 1 96px' }}
-                          onClick={() => {
-                            const url = savedCode
-                              ? `${getApiBase()}/pay?action=renew&code=${encodeURIComponent(savedCode)}`
-                              : `${getApiBase()}/pay?action=new`
-                            openWebUrl(url)
-                          }}
-                        >
-                          {savedCode ? '续费' : '新购'}
-                        </Button>
-                      </Stack>
-
-                      <Stack
-                        direction="row"
-                        spacing={0.8}
-                        sx={{
-                          alignItems: 'center',
-                          borderRadius: '12px',
-                          px: 1.2,
-                          py: 0.7,
-                          bgcolor: 'rgba(255,255,255,.4)',
-                          border: '1px solid rgba(255,255,255,.6)',
-                        }}
-                      >
-                        <Box
-                          sx={{
-                            width: 18,
-                            height: 18,
-                            borderRadius: '50%',
-                            bgcolor: '#5f7bf0',
-                            color: '#fff',
-                            fontSize: 12,
-                            fontWeight: 900,
-                            display: 'grid',
-                            placeItems: 'center',
-                            flexShrink: 0,
-                          }}
-                        >
-                          i
-                        </Box>
-                        <Typography
-                          sx={{
-                            fontSize: 12.5,
-                            color: '#33406e',
-                            fontWeight: 600,
-                          }}
-                        >
-                          测试连通性后，节点名后显示数字(毫秒)即代表该节点连接正常，可放心使用。
-                        </Typography>
-                      </Stack>
-
-                      {status && (
-                        <Alert
-                          severity={
-                            status.includes('失败') ||
-                            status.includes('错误') ||
-                            status.includes('过期')
-                              ? 'error'
-                              : 'info'
-                          }
-                          sx={{ py: 0.35 }}
-                        >
-                          {status}
-                        </Alert>
-                      )}
+                      <NodeSelectionPanel
+                        label={nodeSelectLabel}
+                        nodes={nodes.map((node) => ({
+                          name: node.name,
+                          delay: getNodeDelay(node, nodeGroup?.name),
+                          automatic: isAutomaticNode(node),
+                        }))}
+                        selected={selectedNode}
+                        timeoutMs={DELAY_TIMEOUT}
+                        disabled={busy || !nodeGroup}
+                        testing={delayTesting}
+                        onSelect={changeNode}
+                        onTest={testNodeDelay}
+                      />
                     </Stack>
                   </Box>
+                </Stack>
+                <Stack spacing={1} sx={{ mt: 1.25, position: 'relative' }}>
+                  <Stack
+                    direction="row"
+                    spacing={1}
+                    useFlexGap
+                    sx={{
+                      flexWrap: 'wrap',
+                      '& .MuiButton-root': {
+                        whiteSpace: 'nowrap',
+                        minWidth: 'max-content',
+                        minHeight: 36,
+                      },
+                    }}
+                  >
+                    <Button
+                      variant="contained"
+                      startIcon={<KeyRounded />}
+                      disabled={busy}
+                      onClick={() => {
+                        setCode('')
+                        setCodeImportPhase('input')
+                        setCodeImportMessage('')
+                        setCodeDialogOpen(true)
+                      }}
+                      sx={{
+                        flex: '1 1 132px',
+                        background: 'linear-gradient(135deg, #7f97f4, #5f7bf0)',
+                        color: '#fff',
+                        fontWeight: 800,
+                        boxShadow: '0 8px 20px rgba(95,123,240,.4)',
+                        '&:hover': {
+                          background:
+                            'linear-gradient(135deg, #6f8af2, #4f66e8)',
+                        },
+                      }}
+                    >
+                      {savedCode ? '切换提取码' : '导入订阅'}
+                    </Button>
+                    {!isTunModeAvailable && (
+                      <Button
+                        variant="outlined"
+                        startIcon={<BuildRounded />}
+                        disabled={busy}
+                        sx={{ flex: '1 1 110px' }}
+                        onClick={async () => {
+                          setBusy(true)
+                          setStatus('正在安装 TUN 服务...')
+                          try {
+                            await installService()
+                            await restartCore()
+                            await mutateSystemState()
+                            setStatus('TUN 服务已安装')
+                          } catch (error) {
+                            setStatus(
+                              error instanceof Error
+                                ? error.message
+                                : String(error),
+                            )
+                          } finally {
+                            setBusy(false)
+                          }
+                        }}
+                      >
+                        安装 TUN
+                      </Button>
+                    )}
+                    {isTunModeAvailable && !tunOn && (
+                      <Button
+                        variant="outlined"
+                        color="success"
+                        startIcon={<LanRounded />}
+                        disabled={busy}
+                        sx={{ flex: '1 1 110px' }}
+                        onClick={async () => {
+                          setBusy(true)
+                          setStatus('正在开启 TUN...')
+                          try {
+                            await patchVerge({ enable_tun_mode: true })
+                            await mutateSystemState()
+                            await refreshAll()
+                            setStatus('TUN 已开启')
+                          } catch (error) {
+                            setStatus(
+                              error instanceof Error
+                                ? error.message
+                                : String(error),
+                            )
+                          } finally {
+                            setBusy(false)
+                          }
+                        }}
+                      >
+                        开启 TUN
+                      </Button>
+                    )}
+                    {tunOn && (
+                      <Button
+                        variant="outlined"
+                        color="warning"
+                        startIcon={<LanRounded />}
+                        disabled={busy}
+                        sx={{ flex: '1 1 110px' }}
+                        onClick={async () => {
+                          setBusy(true)
+                          setStatus('正在关闭 TUN...')
+                          try {
+                            await patchVerge({ enable_tun_mode: false })
+                            await mutateSystemState()
+                            await refreshAll()
+                            setStatus('TUN 已关闭')
+                          } catch (error) {
+                            setStatus(
+                              error instanceof Error
+                                ? error.message
+                                : String(error),
+                            )
+                          } finally {
+                            setBusy(false)
+                          }
+                        }}
+                      >
+                        关闭 TUN
+                      </Button>
+                    )}
+                    <Button
+                      variant="outlined"
+                      startIcon={<CloudSyncRounded />}
+                      disabled={busy}
+                      onClick={() => updateCurrentSubscription()}
+                      sx={{ flex: '1 1 116px' }}
+                    >
+                      更新订阅
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      startIcon={<SettingsRounded />}
+                      disabled={busy}
+                      onClick={() => setAdvancedOpen(true)}
+                      sx={{ flex: '1 1 132px' }}
+                    >
+                      高级用户设置
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      startIcon={<ShoppingCartRounded />}
+                      sx={{ flex: '1 1 96px' }}
+                      onClick={() => {
+                        const url = savedCode
+                          ? `${getApiBase()}/pay?action=renew&code=${encodeURIComponent(savedCode)}`
+                          : `${getApiBase()}/pay?action=new`
+                        openWebUrl(url)
+                      }}
+                    >
+                      {savedCode ? '续费' : '新购'}
+                    </Button>
+                  </Stack>
+
+                  {importantStatus && (
+                    <Alert
+                      severity={
+                        status.includes('失败') ||
+                        status.includes('错误') ||
+                        status.includes('过期')
+                          ? 'error'
+                          : 'info'
+                      }
+                      sx={{ py: 0.35 }}
+                    >
+                      {importantStatus}
+                    </Alert>
+                  )}
                 </Stack>
               </Paper>
             </>
@@ -5017,6 +4854,37 @@ const HomePage = () => {
             </DialogTitle>
             <DialogContent sx={{ pt: 1.5 }}>
               <Stack spacing={1.25}>
+                {clientAccountState && (
+                  <Paper
+                    elevation={0}
+                    sx={{
+                      p: 1.5,
+                      borderRadius: '14px',
+                      bgcolor: 'rgba(255,255,255,.6)',
+                    }}
+                  >
+                    <Typography sx={{ fontWeight: 800, mb: 0.5 }}>
+                      账号用量
+                    </Typography>
+                    <Typography sx={{ fontSize: 12 }}>
+                      今日 {formatUsageBytes(clientAccountState.dayUsed)} /{' '}
+                      {clientAccountState.dayLimit
+                        ? formatUsageBytes(clientAccountState.dayLimit)
+                        : '不限'}
+                      {' · '}本月{' '}
+                      {formatUsageBytes(clientAccountState.monthUsed)} /{' '}
+                      {clientAccountState.monthLimit
+                        ? formatUsageBytes(clientAccountState.monthLimit)
+                        : '不限'}
+                    </Typography>
+                    <Typography sx={{ fontSize: 12 }}>
+                      在线 {clientAccountState.onlineDevices}/
+                      {clientAccountState.onlineLimit || '不限'}
+                      {' · '}绑定 {clientAccountState.boundDevices}/
+                      {clientAccountState.boundLimit || '不限'}
+                    </Typography>
+                  </Paper>
+                )}
                 <Paper
                   elevation={0}
                   sx={{
