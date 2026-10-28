@@ -82,6 +82,10 @@ jobs:
         if: steps.check_frontend.outputs.frontend == 'true'
         run: pnpm test:subscription-refresh
 
+      - name: Run startup HTTP deadline and subscription content tests
+        if: steps.check_frontend.outputs.frontend == 'true'
+        run: pnpm test:startup-refresh
+
       - name: Run managed subscription presentation tests
         if: steps.check_frontend.outputs.frontend == 'true'
         run: pnpm test:managed-subscription

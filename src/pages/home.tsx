@@ -55,7 +55,7 @@ import { relaunch } from '@tauri-apps/plugin-process'
 import { useLockFn } from 'ahooks'
 import yaml from 'js-yaml'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { getVersion } from 'tauri-plugin-mihomo-api'
+import { getBaseConfig, getVersion } from 'tauri-plugin-mihomo-api'
 
 import { BasePage, type DialogRef } from '@/components/base'
 import { WebsiteTestViewer } from '@/components/home/website-test-viewer'
@@ -111,6 +111,11 @@ import {
   rotateApiBase,
 } from '@/services/endpoint-resolver'
 import {
+  assertRequestActive,
+  fetchBufferedWithDeadline,
+  withRequestDeadline,
+} from '@/services/http-request-deadline'
+import {
   clearManagedAuth,
   extractTicketFromLaunchUrl,
   hashManagedContent,
@@ -153,6 +158,7 @@ import {
 } from '@/services/update'
 import { VISIBLE_APP_NAME } from '@/services/visible-brand'
 import getSystem from '@/utils/get-system'
+import { prepareSubscriptionContent } from '@/utils/subscription-content'
 import {
   planSubscriptionRefresh,
   type SubscriptionRefreshReason,
@@ -442,6 +448,7 @@ type ClientAccountState = {
 
 type ManagedProfileUpdateResult =
   | 'managed-updated'
+  | 'managed-unchanged'
   | 'managed-detached'
   | 'unmanaged'
 
@@ -685,7 +692,10 @@ const isDomesticApiUrl = (url: string): boolean => {
 
 // 国内 API 始终放在全局规则最前面，避免系统代理开启后又绕进代理节点。
 const ensureDomesticApiDirect = async () => {
-  const content = await readProfileFile('Merge')
+  const content = await withRequestDeadline(
+    () => readProfileFile('Merge'),
+    5000,
+  )
   const data = (yaml.load(content) as Record<string, unknown> | null) || {}
   const prepend = Array.isArray(data['prepend-rules'])
     ? (data['prepend-rules'] as unknown[])
@@ -694,10 +704,15 @@ const ensureDomesticApiDirect = async () => {
     DOMESTIC_API_DIRECT_RULE,
     ...prepend.filter((rule) => rule !== DOMESTIC_API_DIRECT_RULE),
   ]
+  if (
+    prepend[0] === DOMESTIC_API_DIRECT_RULE &&
+    prepend.filter((rule) => rule === DOMESTIC_API_DIRECT_RULE).length === 1
+  )
+    return
   if (!(await saveProfileFile('Merge', yaml.dump(data, { lineWidth: -1 })))) {
     throw new Error('国内 API 直连规则验证失败')
   }
-  if (!(await enhanceProfiles())) throw new Error('国内 API 直连规则应用失败')
+  // saveProfileFile already validates and applies runtime-affecting files.
 }
 
 const normalizeRuleDomain = (input: string) => {
@@ -865,6 +880,9 @@ const HomePage = () => {
   } | null>(null)
   // 订阅更新在途互斥：防止慢请求/掉线恢复时积累并发请求打满服务器。
   const updateInFlightRef = useRef(false)
+  const autoRefreshControllerRef = useRef<AbortController | null>(null)
+  const refreshApplyInFlightRef = useRef(false)
+  useEffect(() => () => autoRefreshControllerRef.current?.abort(), [])
   const [desktopUpdate, setDesktopUpdate] =
     useState<DesktopVersionResponse | null>(null)
   const [busy, setBusy] = useState(false)
@@ -981,11 +999,24 @@ const HomePage = () => {
       return
     }
     let disposed = false
+    let confirmed = 0
+    let checking = false
     const check = async () => {
-      const ready = await getVersion()
-        .then((value) => Boolean(value?.version))
+      if (disposed || checking) return
+      checking = true
+      const ready = await withRequestDeadline(
+        () => Promise.all([getVersion(), getBaseConfig()]),
+        2500,
+      )
+        .then(
+          ([version, active]) =>
+            Boolean(version?.version) &&
+            (systemProxyOn || (tunOn && active?.tun?.enable)),
+        )
         .catch(() => false)
-      if (!disposed) setConnectionReady(ready)
+      checking = false
+      confirmed = ready ? confirmed + 1 : 0
+      if (!disposed) setConnectionReady(confirmed >= 2)
     }
     void check()
     const timer = window.setInterval(check, 3000)
@@ -993,7 +1024,7 @@ const HomePage = () => {
       disposed = true
       window.clearInterval(timer)
     }
-  }, [running])
+  }, [running, systemProxyOn, tunOn])
   const showConnectionOptions = running && connectionReady
   // presence 上报只跟随「稳定后」的 running。UI 仍用 running 即时反馈，
   // 但网络副作用必须等状态真正定下来，避免刷新/重试期间的瞬时翻转
@@ -1079,37 +1110,45 @@ const HomePage = () => {
     async (
       url: string,
       init: Parameters<typeof tauriFetch>[1],
-    ): ReturnType<typeof tauriFetch> => {
-      try {
-        return await fetchWithVerifiedTls(url, init)
-      } catch (err) {
-        if (init?.signal?.aborted) throw err
-        // 国内主域名必须直连；失败后由上层自动换线路，不允许绕代理重试。
-        if (isDomesticApiUrl(url)) throw err
-        // 第 2 层：内核混合端口（在跑时）或系统代理
-        const p = proxyUrlRef.current
-        if (p) {
+    ): ReturnType<typeof tauriFetch> =>
+      withRequestDeadline(
+        async (signal) => {
+          const guarded = { ...init, signal }
+          const fetchPath = (options: Parameters<typeof tauriFetch>[1]) =>
+            fetchBufferedWithDeadline(fetchWithVerifiedTls, url, options)
           try {
-            return await fetchWithVerifiedTls(url, {
-              ...init,
-              proxy: { all: p },
-            })
-          } catch (proxyError) {
-            if (init?.signal?.aborted) throw proxyError
-            // 落到第 3 层
+            return await fetchPath(guarded)
+          } catch (err) {
+            if (signal.aborted) throw err
+            // 国内主域名必须直连；失败后由上层自动换线路，不允许绕代理重试。
+            if (isDomesticApiUrl(url)) throw err
+            // 第 2 层：内核混合端口（在跑时）或系统代理
+            const p = proxyUrlRef.current
+            if (p) {
+              try {
+                return await fetchPath({
+                  ...guarded,
+                  proxy: { all: p },
+                })
+              } catch (proxyError) {
+                if (signal.aborted) throw proxyError
+                // 落到第 3 层
+              }
+            }
+            // 第 3 层：后台下发的兜底代理（bootstrap_proxy），最后一条路
+            const boot = getBootstrapProxy()
+            if (boot && boot !== p) {
+              return await fetchPath({
+                ...guarded,
+                proxy: { all: boot },
+              })
+            }
+            throw err
           }
-        }
-        // 第 3 层：后台下发的兜底代理（bootstrap_proxy），最后一条路
-        const boot = getBootstrapProxy()
-        if (boot && boot !== p) {
-          return await fetchWithVerifiedTls(url, {
-            ...init,
-            proxy: { all: boot },
-          })
-        }
-        throw err
-      }
-    },
+        },
+        20_000,
+        init?.signal,
+      ),
     [],
   )
 
@@ -1212,10 +1251,14 @@ const HomePage = () => {
   )
 
   const fetchManagedSubscription = useCallback(
-    async (auth: Pick<ManagedAuth, 'subscriptionUrl' | 'deviceToken'>) => {
+    async (
+      auth: Pick<ManagedAuth, 'subscriptionUrl' | 'deviceToken'>,
+      signal?: AbortSignal,
+    ) => {
       const response = await apiFetch(auth.subscriptionUrl, {
         method: 'GET',
         connectTimeout: 12000,
+        signal,
         headers: {
           Authorization: `Bearer ${auth.deviceToken}`,
           'User-Agent': CLIENT_UA,
@@ -1492,7 +1535,10 @@ const HomePage = () => {
   )
 
   const updateState = useCallback(
-    async (input: string): Promise<UpdateStateResponse> => {
+    async (
+      input: string,
+      signal?: AbortSignal,
+    ): Promise<UpdateStateResponse> => {
       const params = new URLSearchParams({
         client_id: getClientId(),
       })
@@ -1501,6 +1547,7 @@ const HomePage = () => {
         {
           method: 'GET',
           connectTimeout: 8000,
+          signal,
           headers: {
             'User-Agent': CLIENT_UA,
             'X-Client-Id': getClientId(),
@@ -1595,6 +1642,8 @@ const HomePage = () => {
       options?: {
         force?: boolean
         suppressValidationNotice?: boolean
+        signal?: AbortSignal
+        background?: boolean
       },
     ): Promise<ManagedProfileUpdateResult> => {
       const force = options?.force ?? false
@@ -1610,7 +1659,11 @@ const HomePage = () => {
         return 'managed-detached'
       }
 
-      const localContent = await readProfileFile(auth.profileUid)
+      const localContent = await withRequestDeadline(
+        () => readProfileFile(auth.profileUid),
+        5000,
+        options?.signal,
+      )
       const localHash = await hashManagedContent(localContent)
       if (!force && auth.contentHash && localHash !== auth.contentHash) {
         await persistManagedAuth({
@@ -1622,18 +1675,48 @@ const HomePage = () => {
         return 'managed-detached'
       }
 
-      const snapshot = await readRuleSnapshot(auth.profileUid)
-      const content = await fetchManagedSubscription(auth)
+      const downloaded = await fetchManagedSubscription(auth, options?.signal)
+      assertRequestActive(options?.signal)
       if (managedAuthRef.current !== auth)
         throw new Error('提取码已变化，已取消旧订阅更新')
-      const saved = await saveProfileFile(auth.profileUid, content, {
-        suppressValidationNotice,
-      })
-      if (!saved) throw new Error('远程订阅内容验证失败，已保留原配置')
+      const content = prepareSubscriptionContent(localContent, downloaded)
+      if (content === null) {
+        if (
+          auth.detached ||
+          auth.contentHash !== localHash ||
+          remoteVersion > auth.updateVersion
+        ) {
+          if (options?.background) {
+            refreshApplyInFlightRef.current = true
+            setBusy(true)
+          }
+          try {
+            await persistManagedAuth({
+              ...auth,
+              contentHash: localHash,
+              detached: false,
+              updateVersion: Math.max(auth.updateVersion, remoteVersion),
+            })
+          } finally {
+            if (options?.background) {
+              refreshApplyInFlightRef.current = false
+              setBusy(false)
+            }
+          }
+        }
+        return 'managed-unchanged'
+      }
+      assertRequestActive(options?.signal)
+      if (options?.background) {
+        refreshApplyInFlightRef.current = true
+        setBusy(true)
+      }
+      let saved = false
       try {
-        await restoreRuleSnapshot(auth.profileUid, snapshot, {
+        saved = await saveProfileFile(auth.profileUid, content, {
           suppressValidationNotice,
         })
+        if (!saved) throw new Error('远程订阅内容验证失败，已保留原配置')
         const savedContent = await readProfileFile(auth.profileUid)
         await persistManagedAuth({
           ...auth,
@@ -1642,6 +1725,7 @@ const HomePage = () => {
           updateVersion: Math.max(auth.updateVersion, remoteVersion),
         })
       } catch (error) {
+        if (!saved) throw error // native validation has already restored the file
         const restored = await saveProfileFile(auth.profileUid, localContent, {
           suppressValidationNotice,
         }).catch(() => false)
@@ -1652,6 +1736,11 @@ const HomePage = () => {
             : `${message}；更新前订阅也未能自动恢复`,
           { cause: error },
         )
+      } finally {
+        if (options?.background) {
+          refreshApplyInFlightRef.current = false
+          setBusy(false)
+        }
       }
       return 'managed-updated'
     },
@@ -2436,9 +2525,15 @@ const HomePage = () => {
     let failures = 0
 
     // 返回 true 表示本轮网络请求成功（用于复位退避）。
-    const checkOnce = async (refreshAtStartup: boolean): Promise<boolean> => {
+    const checkOnce = async (
+      refreshAtStartup: boolean,
+      signal: AbortSignal,
+    ): Promise<boolean> => {
+      assertRequestActive(signal)
       // 处于到期占位配置时，低频探测提取码是否已续费，成功则自动恢复正式订阅。
       if (onExpiredProfile()) {
+        refreshApplyInFlightRef.current = true
+        setBusy(true)
         try {
           const recovered = await recoverFromExpired()
           if (recovered) {
@@ -2450,12 +2545,16 @@ const HomePage = () => {
           // 仍未续费/服务器拒绝 → 保持占位配置；网络错误则交给退避。
           if (error instanceof AccessCodeStateError) return true
           throw error
+        } finally {
+          refreshApplyInFlightRef.current = false
+          setBusy(false)
         }
       }
 
       let refreshReason: SubscriptionRefreshReason | null = null
       try {
-        const state = await updateState(currentCode)
+        const state = await updateState(currentCode, signal)
+        assertRequestActive(signal)
         await syncExpiresAt(state.expires_at)
         const remoteVersion = Number(state.update_version || 0)
         const localVersion = Number(
@@ -2475,24 +2574,41 @@ const HomePage = () => {
           )
           const result = await updateManagedProfile(remoteVersion, {
             suppressValidationNotice: true,
+            signal,
+            background: true,
           })
           if (result === 'unmanaged') {
-            await updateCurrentProfileKeepingRules(true)
+            assertRequestActive(signal)
+            refreshApplyInFlightRef.current = true
+            setBusy(true)
+            try {
+              await updateCurrentProfileKeepingRules(true)
+            } finally {
+              refreshApplyInFlightRef.current = false
+              setBusy(false)
+            }
           }
           localStorage.setItem(
             CODE_UPDATE_VERSION_STORAGE_KEY,
             String(Math.max(localVersion, remoteVersion)),
           )
           if (result !== 'managed-detached') {
-            await mutateProfiles()
-            await refreshAll()
+            void mutateProfiles().catch(() => undefined)
+            // The subscription transaction is complete. Read-only UI queries may
+            // be slow during core recovery and must not hold its startup marker.
+            void refreshAll().catch(() => undefined)
             setStatus(
-              refreshReason === 'startup' ? '启动订阅刷新完成' : '订阅已更新',
+              result === 'managed-unchanged'
+                ? '当前节点已是最新'
+                : refreshReason === 'startup'
+                  ? '启动订阅刷新完成'
+                  : '订阅已更新',
             )
           }
         }
         return true
       } catch (error) {
+        if (signal.aborted) throw error
         const blockedByServer =
           error instanceof AccessCodeStateError && error.serverRejected
         const blockedByLocalExpire = Boolean(
@@ -2501,7 +2617,14 @@ const HomePage = () => {
 
         // 已到期：切换到占位配置并弹窗提示续费（保持连接而非直接断开）。
         if (blockedByServer || blockedByLocalExpire) {
-          await activateExpiredProfile().catch(() => {})
+          refreshApplyInFlightRef.current = true
+          setBusy(true)
+          try {
+            await activateExpiredProfile().catch(() => {})
+          } finally {
+            refreshApplyInFlightRef.current = false
+            setBusy(false)
+          }
           setExpiredDialogOpen(true)
           setStatus('提取码已到期，请续费后重新使用')
           return true
@@ -2539,8 +2662,10 @@ const HomePage = () => {
         return
       }
       updateInFlightRef.current = true
+      const controller = new AbortController()
+      autoRefreshControllerRef.current = controller
       try {
-        await checkOnce(refreshAtStartup)
+        await checkOnce(refreshAtStartup, controller.signal)
         failures = 0
         if (refreshAtStartup) {
           startupRefreshCompletedRef.current = true
@@ -2551,11 +2676,14 @@ const HomePage = () => {
           }
         }
       } catch {
+        if (controller.signal.aborted) return
         failures = Math.min(failures + 1, 4)
         // 网络失败可能是当前 API 线路失联，后台切换到下一条候选线路。
         rotateApiBase(proxyUrlRef.current || undefined).catch(() => undefined)
       } finally {
         updateInFlightRef.current = false
+        if (autoRefreshControllerRef.current === controller)
+          autoRefreshControllerRef.current = null
       }
       if (failures > 0 && refreshAtStartup) schedule(true)
       else if (running) schedule()
@@ -2612,12 +2740,14 @@ const HomePage = () => {
       if (result === 'unmanaged') {
         await updateCurrentProfileKeepingRules(true)
       }
-      await mutateProfiles()
-      await refreshAll()
+      void mutateProfiles().catch(() => undefined)
+      void refreshAll().catch(() => undefined)
       setStatus(
-        result === 'managed-updated'
-          ? '受管订阅已重新获取；本地编辑已恢复远程管理'
-          : '订阅已更新，同提取码规则已保留',
+        result === 'managed-unchanged'
+          ? '当前节点已是最新'
+          : result === 'managed-updated'
+            ? '受管订阅已重新获取；本地编辑已恢复远程管理'
+            : '订阅已更新，同提取码规则已保留',
       )
     } catch (error) {
       console.warn('手动订阅更新失败，已继续使用原订阅', error)
@@ -2810,7 +2940,7 @@ const HomePage = () => {
   const waitForCoreReady = useCallback(async () => {
     for (let attempt = 0; attempt < 8; attempt += 1) {
       try {
-        const version = await getVersion()
+        const version = await withRequestDeadline(() => getVersion(), 1500)
         if (version?.version) return true
       } catch {
         // 核心刚启动时控制器会短暂不可用，继续等待。
@@ -2823,7 +2953,7 @@ const HomePage = () => {
   const waitForCoreStopped = useCallback(async () => {
     for (let attempt = 0; attempt < 8; attempt += 1) {
       try {
-        const version = await getVersion()
+        const version = await withRequestDeadline(() => getVersion(), 1500)
         if (!version?.version) return true
       } catch {
         return true
@@ -2834,6 +2964,11 @@ const HomePage = () => {
   }, [])
 
   const togglePower = useLockFn(async () => {
+    if (refreshApplyInFlightRef.current) {
+      setStatus('正在完成节点配置更新，请稍后再试')
+      return
+    }
+    autoRefreshControllerRef.current?.abort()
     setBusy(true)
     try {
       if (running) {
@@ -2870,13 +3005,12 @@ const HomePage = () => {
 
         if (!expired) {
           try {
-            const state = await updateState(currentCode)
-            if (state.update_version) {
-              localStorage.setItem(
-                CODE_UPDATE_VERSION_STORAGE_KEY,
-                String(state.update_version),
-              )
-            }
+            const state = await withRequestDeadline(
+              (signal) => updateState(currentCode, signal),
+              5000,
+            )
+            await syncExpiresAt(state.expires_at)
+            // Checking validity does not mean its newer subscription was saved.
           } catch (error) {
             if (error instanceof AccessCodeStateError && error.serverRejected) {
               expired = true
@@ -3176,6 +3310,11 @@ const HomePage = () => {
 
   const importManagedRequest = useLockFn(
     async (request: ManagedImportRequest) => {
+      if (refreshApplyInFlightRef.current) {
+        setStatus('正在完成节点配置更新，请稍后重新导入')
+        return
+      }
+      autoRefreshControllerRef.current?.abort()
       const connectivity = {
         wasRunning: running,
         tunEnabled: tunOn,
@@ -3251,6 +3390,11 @@ const HomePage = () => {
   }, [importManagedRequest])
 
   const importByCode = useLockFn(async (startAfterImport = false) => {
+    if (refreshApplyInFlightRef.current) {
+      setCodeImportMessage('正在完成节点配置更新，请稍后再试')
+      return
+    }
+    autoRefreshControllerRef.current?.abort()
     const value = code.trim()
     if (!value) {
       setCodeImportMessage('请输入提取码')

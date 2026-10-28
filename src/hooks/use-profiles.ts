@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { useCallback } from 'react'
 import { selectNodeForGroup } from 'tauri-plugin-mihomo-api'
 
 import {
@@ -34,9 +35,9 @@ export const useProfiles = () => {
     refetchInterval: false,
   })
 
-  const mutateProfiles = async () => {
+  const mutateProfiles = useCallback(async () => {
     await refetch()
-  }
+  }, [refetch])
 
   const patchProfiles = async (
     value: Partial<IProfilesConfig>,
