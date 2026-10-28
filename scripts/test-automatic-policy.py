@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
 """Compile pure runtime-policy tests and exercise isolated Mihomo failover.
 
-Requires rustc + built serde_yaml_ng rlib, Python3 and the current core binary.
+Requires Cargo/rustc, cached locked dependencies, Python3 and the current core binary.
 Only temporary files, localhost ports and fake nodes are used. Never installs,
 changes system proxy/TUN, reads subscriptions, or contacts public test URLs.
 """
 import argparse
 import json
 import socket
+import shutil
 import socketserver
 import subprocess
 import tempfile
 import threading
 import time
+import tomllib
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
 
 def run(*args, **kwargs):
-    return subprocess.run(args, check=True, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, **kwargs).stdout
+    process = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+    if process.returncode:
+        # Local Cargo/core diagnostics only; these commands carry no credentials.
+        raise RuntimeError(process.stderr.decode(errors='replace')[-12000:])
+    return process.stdout
 
 
 class FakeSocks(socketserver.ThreadingTCPServer):
@@ -68,24 +73,38 @@ class Handler(socketserver.BaseRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--deps', required=True, type=Path)
+    parser.add_argument('--deps', type=Path, help='Legacy argument; no release rlib is linked')
     parser.add_argument('--core', required=True, type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
-    deps = args.deps.resolve()
-    libraries = sorted(deps.glob('libserde_yaml_ng-*.rlib'))
-    assert libraries, 'compile the current Rust target first'
     source = root / 'src-tauri/src/enhance/automatic.rs'
     with tempfile.TemporaryDirectory(prefix='shenxian-auto-policy-') as temporary:
         work = Path(temporary)
-        options = ['-L', 'dependency=' + str(deps), '--extern', 'serde_yaml_ng=' + str(libraries[0])]
-        run('rustc', '--edition', '2024', '--test', str(source), *options, '-o', str(work / 'tests'))
-        print(run(str(work / 'tests')).decode(), end='')
-        wrapper = work / 'fixture.rs'
-        wrapper.write_text('#[path = ' + json.dumps(str(source)) + '] mod automatic;\n'
+        # Release dependencies may use LTO/profile-specific compiler options.
+        # A standalone Cargo harness compiles the exact production source using
+        # the repository lockfile and cached crates, rather than linking an
+        # arbitrary release rlib with incompatible test/compiler settings.
+        harness = work / 'harness'
+        harness.mkdir()
+        shutil.copy2(root / 'Cargo.lock', harness / 'Cargo.lock')
+        (harness / 'Cargo.toml').write_text(
+            '[package]\nname = "automatic-policy-check"\nversion = "0.0.0"\nedition = "2024"\n'
+            '[workspace]\n[dependencies]\nserde_yaml_ng = "=0.10.0"\n'
+            '[lib]\npath = "lib.rs"\n[[bin]]\nname = "fixture"\npath = "fixture.rs"\n')
+        (harness / 'lib.rs').write_text('#[path = ' + json.dumps(str(source)) + '] mod automatic;')
+        (harness / 'fixture.rs').write_text('#[path = ' + json.dumps(str(source)) + '] mod automatic;\n'
             'fn main() { let mut config: serde_yaml_ng::Mapping = serde_yaml_ng::from_str(&std::fs::read_to_string(std::env::args().nth(1).unwrap()).unwrap()).unwrap();'
             'automatic::ensure_automatic_selection(&mut config); println!("{}",serde_yaml_ng::to_string(&config).unwrap()); }')
-        run('rustc', '--edition', '2024', str(wrapper), *options, '-o', str(work / 'fixture'))
+        print(run('cargo', 'test', '--offline', '--manifest-path', str(harness / 'Cargo.toml'), '--lib').decode(), end='')
+        run('cargo', 'build', '--offline', '--manifest-path', str(harness / 'Cargo.toml'), '--bin', 'fixture')
+        locked = {
+            (p['name'], p['version'], p.get('checksum'))
+            for p in tomllib.loads((root / 'Cargo.lock').read_text())['package']
+        }
+        for package in tomllib.loads((harness / 'Cargo.lock').read_text())['package']:
+            if package.get('source'):
+                assert (package['name'], package['version'], package.get('checksum')) in locked
+        fixture_program = harness / 'target/debug/fixture'
         servers = [FakeSocks(('127.0.0.1', 0), Handler) for _ in range(2)]
         core = None
         try:
@@ -107,7 +126,7 @@ def main():
             }
             raw = work / 'input.json'
             raw.write_text(json.dumps(fixture, ensure_ascii=False))
-            generated = run(str(work / 'fixture'), str(raw)).decode()
+            generated = run(str(fixture_program), str(raw)).decode()
             # Validate the EXACT production policy before replacing only the
             # probe URL/interval/timeout for the offline failure simulation.
             config = work / 'config.yaml'
