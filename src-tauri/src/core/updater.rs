@@ -1,5 +1,6 @@
 use crate::{
     config::Config,
+    core::notification::NotificationSystem,
     singleton,
     utils::{brand, dirs},
 };
@@ -12,7 +13,7 @@ use std::{
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
 };
-use tauri::{AppHandle, Emitter as _};
+use tauri::AppHandle;
 use tauri_plugin_updater::{Update, UpdaterExt as _};
 
 pub const UPDATE_FALLBACK_PROGRESS_EVENT: &str = "shenxianyun://update-fallback-progress";
@@ -82,7 +83,8 @@ fn emit_update_progress(
     chunk_length: Option<usize>,
     content_length: Option<u64>,
 ) {
-    let _ = app_handle.emit(
+    NotificationSystem::broadcast(
+        app_handle,
         UPDATE_FALLBACK_PROGRESS_EVENT,
         UpdateFallbackProgress {
             source: source.label(),

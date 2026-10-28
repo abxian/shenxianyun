@@ -29,7 +29,9 @@ test('Windows update entry points use the in-app fallback command', async () => 
   assert.match(service, /invoke<void>\('install_app_update_with_fallback'/)
   assert.match(updater, /UpdateSource::Dufs/)
   assert.match(updater, /UpdateSource::Github/)
-  assert.match(updater, /update\.install\(bytes\)/)
+  assert.match(updater, /update\.install\(&?bytes\)/)
+  assert.match(updater, /tokio::task::spawn_blocking/)
+  assert.match(updater, /NotificationSystem::broadcast\(/)
   assert.doesNotMatch(updater, /open::|open_web_url/)
 })
 

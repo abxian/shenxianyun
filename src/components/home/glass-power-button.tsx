@@ -18,9 +18,13 @@ export const GlassPowerButton = ({
 }: GlassPowerButtonProps) => (
   <Box
     sx={{
-      width: prominent ? 'clamp(170px, 30vh, 234px)' : 148,
+      '--power-size': prominent ? 'clamp(170px, 30vh, 234px)' : '148px',
+      '--power-inset': (theme) => theme.spacing(1.3),
+      width: 'var(--power-size)',
+      height: 'var(--power-size)',
+      flex: '0 0 auto',
       aspectRatio: '1',
-      p: 1.3,
+      p: 'var(--power-inset)',
       boxSizing: 'border-box',
       borderRadius: '50%',
       border: '1px solid rgba(255,255,255,.7)',
@@ -35,8 +39,11 @@ export const GlassPowerButton = ({
       disabled={disabled || busy}
       aria-label={busy ? '正在处理连接' : running ? '停止连接' : '启动连接'}
       sx={{
-        width: '100%',
-        height: '100%',
+        width:
+          'calc(var(--power-size) - var(--power-inset) - var(--power-inset) - 2px)',
+        height:
+          'calc(var(--power-size) - var(--power-inset) - var(--power-inset) - 2px)',
+        p: 0,
         minWidth: 0,
         borderRadius: '50%',
         color: '#fff',

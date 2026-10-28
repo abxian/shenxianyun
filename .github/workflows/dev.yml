@@ -182,6 +182,10 @@ jobs:
         run: |
           python3 scripts/test-automatic-policy.py --deps target/${{ matrix.target }}/release/deps --core src-tauri/sidecar/verge-mihomo-${{ matrix.target }}
 
+      - name: Check native frontend event dispatch
+        if: matrix.id == 'macos-aarch64' && github.event.inputs[matrix.input] == 'true'
+        run: python3 scripts/test-notification-dispatch.py
+
       - name: Upload Artifacts (macOS)
         if: matrix.os == 'macos-latest' && github.event.inputs[matrix.input] == 'true'
         uses: actions/upload-artifact@v7

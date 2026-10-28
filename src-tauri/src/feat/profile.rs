@@ -1,13 +1,12 @@
 use crate::{
     cmd,
     config::{Config, PrfItem, PrfOption, profiles::profiles_draft_update_item_safe},
-    core::{CoreManager, handle, tray, validate::ValidationOutcome},
+    core::{CoreManager, handle, notification::NotificationSystem, tray, validate::ValidationOutcome},
     utils::help::{mask_err, mask_url},
 };
 use anyhow::{Result, anyhow, bail};
 use clash_verge_logging::{Type, logging, logging_error};
 use smartstring::alias::String;
-use tauri::Emitter as _;
 
 /// Toggle proxy profile
 pub async fn toggle_proxy_profile(profile_index: String) {
@@ -25,7 +24,7 @@ pub async fn switch_proxy_node(group_name: &str, proxy_name: &str) {
     {
         Ok(_) => {
             logging!(info, Type::Tray, "切换代理成功: {} -> {}", group_name, proxy_name);
-            let _ = handle::Handle::app_handle().emit("verge://refresh-proxy-config", ());
+            NotificationSystem::broadcast(handle::Handle::app_handle(), "verge://refresh-proxy-config", ());
             let _ = tray::Tray::global().update_menu().await;
             return;
         }

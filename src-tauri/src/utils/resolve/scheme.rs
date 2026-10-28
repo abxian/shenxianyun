@@ -6,11 +6,10 @@ use tauri::Url;
 use crate::{
     cmd::managed::{self, ManagedImportRequest},
     config::{Config, PrfItem, profiles},
-    core::{CoreManager, handle},
+    core::{CoreManager, handle, notification::NotificationSystem},
     utils::help,
 };
 use clash_verge_logging::{Type, logging, logging_error};
-use tauri::Emitter as _;
 
 pub(super) async fn resolve_scheme(param: &str) -> Result<()> {
     let param_str = if param.starts_with("[") && param.len() > 4 {
@@ -29,7 +28,7 @@ pub(super) async fn resolve_scheme(param: &str) -> Result<()> {
 
     if let Some(request) = extract_managed_import_request(&link_parsed) {
         managed::queue_managed_import(request);
-        let _ = handle::Handle::app_handle().emit("shenxianyun://managed-import", ());
+        NotificationSystem::broadcast(handle::Handle::app_handle(), "shenxianyun://managed-import", ());
         logging!(info, Type::Config, "queued protected subscription import request");
         return Ok(());
     }
