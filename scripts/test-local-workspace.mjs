@@ -216,3 +216,45 @@ test('manual profile starts without checking an expired saved account', async ()
   await actual('togglePower', p)()
   assert.deepEqual(events, ['core', ['proxy', true]])
 })
+
+test('stopped local workspace keeps settings and editor open while normal mode closes them', () => {
+  let effect
+  const find = (n) => {
+    if (
+      ts.isCallExpression(n) &&
+      n.expression.getText(ast) === 'useEffect' &&
+      n.arguments[0]
+        ?.getText(ast)
+        .includes('previousRunningRef.current && !running')
+    )
+      effect = n.arguments[0].getText(ast)
+    ts.forEachChild(n, find)
+  }
+  find(ast)
+  assert.ok(effect)
+  const js = ts.transpileModule('const effect = ' + effect, {
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.None,
+    },
+  }).outputText
+  const create = new Function('ports', 'with(ports){' + js + ';return effect}')
+  for (const localWorkspace of [true, false]) {
+    const closed = []
+    const p = {
+      busy: false,
+      running: false,
+      localWorkspace,
+      previousRunningRef: { current: false },
+      savedCode: 'fixture',
+      current: { uid: 'fixture-profile' },
+      setAdvancedOpen: () => closed.push('advanced'),
+      setTrafficRuleOpen: () => closed.push('rules'),
+      setProfileManagerOpen: () => closed.push('profiles'),
+      setSelfCheckOpen: () => closed.push('diagnostics'),
+      setEditorState: () => closed.push('editor'),
+    }
+    create(p)()
+    assert.equal(closed.length, localWorkspace ? 0 : 5)
+  }
+})
