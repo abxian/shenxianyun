@@ -91,6 +91,7 @@ import {
   patchClashMode,
   patchProfile,
   patchProfilesConfig,
+  patchVergeConfig,
   readProfileFile,
   repairService,
   restartCore,
@@ -785,7 +786,7 @@ const delayRank = (proxy: IProxyItem, groupName = '') => {
 }
 
 const HomePage = () => {
-  const { verge, patchVerge } = useVerge()
+  const { verge, patchVerge, mutateVerge } = useVerge()
   const { response: connectionResponse } = useConnectionData()
   const { clash, patchClash } = useClash()
   const { profiles, current, mutateProfiles } = useProfiles()
@@ -843,6 +844,10 @@ const HomePage = () => {
   const [clientAccountState, setClientAccountState] =
     useState<ClientAccountState | null>(null)
   const [codeDialogOpen, setCodeDialogOpen] = useState(false)
+  const codeEntryActiveRef = useRef(false)
+  useEffect(() => {
+    codeEntryActiveRef.current = codeDialogOpen
+  }, [codeDialogOpen])
   const [codeImportPhase, setCodeImportPhase] =
     useState<CodeImportPhase>('input')
   const [codeImportMessage, setCodeImportMessage] = useState('')
@@ -2823,7 +2828,8 @@ const HomePage = () => {
       canRun: () =>
         !backgroundBusyRef.current &&
         !updateInFlightRef.current &&
-        !refreshApplyInFlightRef.current,
+        !refreshApplyInFlightRef.current &&
+        !codeEntryActiveRef.current,
       intervalMs: () =>
         document.visibilityState === 'hidden' ? 60_000 : 30_000,
     })
@@ -2847,6 +2853,7 @@ const HomePage = () => {
   }, [current?.uid, currentCode, managedAuthReady])
 
   const updateCurrentSubscription = useLockFn(async (automatic = false) => {
+    if (automatic && codeEntryActiveRef.current) return
     if (!current?.uid) {
       setStatus('还没有可更新的订阅')
       return
@@ -3209,6 +3216,62 @@ const HomePage = () => {
     }
     return false
   }, [])
+
+  const openCodeImport = useLockFn(async () => {
+    if (
+      busy ||
+      manualBusy ||
+      backgroundBusyRef.current ||
+      refreshApplyInFlightRef.current
+    ) {
+      setStatus('正在完成配置操作，请稍后再切换提取码')
+      return
+    }
+    // Own the transition before canceling old reads; pause disconnect/focus refresh.
+    codeEntryActiveRef.current = true
+    backgroundBusyRef.current = true
+    autoRefreshControllerRef.current?.abort()
+    setBusy(true)
+    setStatus('')
+    try {
+      if (running || systemProxyConfigOn) {
+        // Await native writes, without an optimistic toggle or a write timeout.
+        await patchVergeConfig({
+          enable_system_proxy: false,
+          enable_tun_mode: false,
+        })
+        mutateVerge(
+          (previous) =>
+            previous
+              ? {
+                  ...previous,
+                  enable_system_proxy: false,
+                  enable_tun_mode: false,
+                }
+              : previous,
+          false,
+        )
+        await stopCore()
+        setConnectionReady(false)
+        proxyUrlRef.current = ''
+        previousRunningRef.current = false
+        void invalidateProxyState().catch(() => undefined)
+        void refreshAll().catch(() => undefined)
+        void sendClientPresence(false).catch(() => undefined)
+      }
+      setExpiredDialogOpen(false)
+      setCode('')
+      setCodeImportPhase('input')
+      setCodeImportMessage('')
+      setCodeDialogOpen(true)
+    } catch {
+      codeEntryActiveRef.current = false
+      setStatus('未能停止当前连接，请先点击停止，再重试切换提取码')
+    } finally {
+      backgroundBusyRef.current = false
+      setBusy(false)
+    }
+  })
 
   const togglePower = useLockFn(async () => {
     if (manualBusy) {
@@ -3712,6 +3775,11 @@ const HomePage = () => {
       setCodeImportPhase('input')
       setCodeImportMessage('')
       setStatus('已进入本机高级模式，可先管理配置，再点击启动')
+      return
+    }
+    if (running || systemProxyConfigOn) {
+      setCodeImportPhase('input')
+      setCodeImportMessage('请先停止代理，再切换提取码')
       return
     }
     if (refreshApplyInFlightRef.current) {
@@ -4801,15 +4869,10 @@ const HomePage = () => {
                 ) : (
                   <Button
                     variant="outlined"
-                    disabled={busy || running}
+                    disabled={busy}
                     startIcon={<KeyRounded />}
                     sx={{ ...outlineButtonSx, py: 1.2 }}
-                    onClick={() => {
-                      setCode('')
-                      setCodeImportPhase('input')
-                      setCodeImportMessage('')
-                      setCodeDialogOpen(true)
-                    }}
+                    onClick={() => void openCodeImport()}
                   >
                     切换提取码
                   </Button>
@@ -5048,12 +5111,7 @@ const HomePage = () => {
                       variant="contained"
                       startIcon={<KeyRounded />}
                       disabled={busy}
-                      onClick={() => {
-                        setCode('')
-                        setCodeImportPhase('input')
-                        setCodeImportMessage('')
-                        setCodeDialogOpen(true)
-                      }}
+                      onClick={() => void openCodeImport()}
                       sx={{
                         flex: '1 1 132px',
                         background: 'linear-gradient(135deg, #7f97f4, #5f7bf0)',
@@ -5066,7 +5124,11 @@ const HomePage = () => {
                         },
                       }}
                     >
-                      {savedCode ? '切换提取码' : '导入订阅'}
+                      {savedCode
+                        ? running
+                          ? '断开并切换提取码'
+                          : '切换提取码'
+                        : '导入订阅'}
                     </Button>
                     {!isTunModeAvailable && (
                       <Button
@@ -6676,15 +6738,7 @@ const HomePage = () => {
               >
                 去续费
               </Button>
-              <Button
-                onClick={() => {
-                  setExpiredDialogOpen(false)
-                  setCode('')
-                  setCodeImportPhase('input')
-                  setCodeImportMessage('')
-                  setCodeDialogOpen(true)
-                }}
-              >
+              <Button disabled={busy} onClick={() => void openCodeImport()}>
                 切换提取码
               </Button>
               <Button onClick={() => setExpiredDialogOpen(false)}>关闭</Button>

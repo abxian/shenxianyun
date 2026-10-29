@@ -92,6 +92,9 @@ jobs:
         if: steps.check_frontend.outputs.frontend == 'true'
         run: pnpm test:startup-refresh
 
+      - name: Code switch disconnect transaction tests
+        run: pnpm test:code-switch
+
       - name: Run managed subscription presentation tests
         if: steps.check_frontend.outputs.frontend == 'true'
         run: pnpm test:managed-subscription
