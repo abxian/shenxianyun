@@ -6482,6 +6482,9 @@ const HomePage = () => {
             </DialogTitle>
             <DialogContent sx={{ pt: 1.5 }}>
               <Stack spacing={1.6}>
+                {importantStatus && (
+                  <Alert severity="warning">{importantStatus}</Alert>
+                )}
                 <Typography sx={{ fontSize: 12, color: 'rgba(36,46,66,.62)' }}>
                   web 断网或无法导入提取码订阅时，可在此手动导入其它 Clash
                   订阅链接、新建/编辑本地配置，并随时切换当前使用的配置文件。
