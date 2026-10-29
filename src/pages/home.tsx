@@ -2621,8 +2621,18 @@ const HomePage = () => {
     async (signal: AbortSignal) => {
       if (!currentCode || !current?.uid) return
       updateInFlightRef.current = true
+      const originalDeviceToken = managedAuthRef.current?.deviceToken
+      const assertAccountCurrent = () => {
+        if (
+          localStorage.getItem(CODE_STORAGE_KEY) !== currentCode ||
+          (originalDeviceToken &&
+            managedAuthRef.current?.deviceToken !== originalDeviceToken)
+        )
+          throw new Error('提取码身份已变化，已取消旧订阅检查')
+      }
       try {
         const state = await updateState(currentCode, signal)
+        assertAccountCurrent()
         assertRequestActive(signal)
         const wasRestricted =
           restrictionRef.current?.accessCode === currentCode ||
@@ -2688,6 +2698,7 @@ const HomePage = () => {
               setBusy(false)
             }
           }
+          assertAccountCurrent()
           // Never consume a revision for a failed or intentionally detached update.
           if (result !== 'managed-detached') {
             localStorage.setItem(
@@ -2715,6 +2726,7 @@ const HomePage = () => {
           void mutateProfiles().catch(() => undefined)
           void refreshAll().catch(() => undefined)
         }
+        assertAccountCurrent()
         clearAccessRestriction(currentCode)
         setExpiredDialogOpen(false)
       } catch (error) {

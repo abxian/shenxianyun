@@ -55,6 +55,7 @@ const flush = async () => {
 
 const ports = () => {
   const storage = new Map([
+    ['code', 'fixture'],
     ['version', '10'],
     ['revision', JSON.stringify({ accessCode: 'fixture', revision: 'old' })],
   ])
@@ -66,6 +67,7 @@ const ports = () => {
     current: { uid: 'fixture-profile' },
     expiresAt: '2030-01-01 00:00:00',
     running: false,
+    CODE_STORAGE_KEY: 'code',
     CODE_UPDATE_VERSION_STORAGE_KEY: 'version',
     CODE_REVISION_STORAGE_KEY: 'revision',
     STARTUP_REFRESH_SESSION_KEY: 'startup',
@@ -371,4 +373,24 @@ test('monitor waits for configuration transaction ownership and cancels its actu
   await flush()
   assert.equal(signal.aborted, true)
   assert.equal(clock.timers.size, 0)
+})
+
+test('an account switch during an apply cannot consume its predecessor revision', async () => {
+  const p = ports()
+  p.updateState = async () => ({
+    ok: true,
+    update_version: 11,
+    subscription_revision: 'new',
+  })
+  p.updateManagedProfile = async () => {
+    p.storage.set('code', 'replacement')
+    return 'managed-updated'
+  }
+  await assert.rejects(
+    createCheck(p)(new AbortController().signal),
+    /身份已变化/,
+  )
+  assert.equal(p.storage.get('version'), '10')
+  assert.equal(JSON.parse(p.storage.get('revision')).revision, 'old')
+  assert.ok(!p.events.includes('clear'))
 })
