@@ -61,6 +61,7 @@ import { GlassPowerButton } from '@/components/home/glass-power-button'
 import { NodeSelectionPanel } from '@/components/home/node-selection-panel'
 import { WebsiteTestViewer } from '@/components/home/website-test-viewer'
 import { EditorViewer } from '@/components/profile/editor-viewer'
+import { FileInput } from '@/components/profile/file-input'
 import { ClashPortViewer } from '@/components/setting/mods/clash-port-viewer'
 import { ControllerViewer } from '@/components/setting/mods/controller-viewer'
 import { TunnelsViewer } from '@/components/setting/mods/tunnels-viewer'
@@ -172,6 +173,11 @@ import {
 import getSystem from '@/utils/get-system'
 import { isAutomaticNode, sortHomeNodes } from '@/utils/home-node-order'
 import { homeStatusMessage } from '@/utils/home-status'
+import {
+  accountExpiryLabel,
+  homeWorkspaceVisible,
+  isLocalSettingsCommand,
+} from '@/utils/local-workspace'
 import { prepareSubscriptionContent } from '@/utils/subscription-content'
 import { version as desktopBuildVersion } from '@root/package.json'
 
@@ -839,6 +845,7 @@ const HomePage = () => {
     useState<CodeImportPhase>('input')
   const [codeImportMessage, setCodeImportMessage] = useState('')
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [localWorkspace, setLocalWorkspace] = useState(false)
   const portViewerRef = useRef<DialogRef>(null)
   const controllerViewerRef = useRef<DialogRef>(null)
   const webUIViewerRef = useRef<DialogRef>(null)
@@ -879,8 +886,8 @@ const HomePage = () => {
     useState<DesktopVersionResponse | null>(null)
   const [busy, setBusy] = useState(false)
   useEffect(() => {
-    backgroundBusyRef.current = busy
-  }, [busy])
+    backgroundBusyRef.current = busy || manualBusy
+  }, [busy, manualBusy])
   const [modeOverride, setModeOverride] = useState('')
   const [updating, setUpdating] = useState(false)
   const [updPercent, setUpdPercent] = useState(0)
@@ -1021,7 +1028,11 @@ const HomePage = () => {
       window.clearInterval(timer)
     }
   }, [running, systemProxyOn, tunOn])
-  const showConnectionOptions = running && connectionReady
+  const showConnectionOptions = homeWorkspaceVisible(
+    localWorkspace,
+    running,
+    connectionReady,
+  )
   // presence 上报只跟随「稳定后」的 running。UI 仍用 running 即时反馈，
   // 但网络副作用必须等状态真正定下来，避免刷新/重试期间的瞬时翻转
   // 被当成一次真实的启停，向服务端多发一对 offline+heartbeat。
@@ -1052,6 +1063,10 @@ const HomePage = () => {
     (current.uid === codeProfileUid || current.uid === expiredProfileUid)
       ? savedCode
       : ''
+  const activeCodeRef = useRef(currentCode)
+  useEffect(() => {
+    activeCodeRef.current = currentCode
+  }, [currentCode])
   const isSwitchingCode = Boolean(
     savedCode && code.trim() && code.trim() !== savedCode,
   )
@@ -1821,7 +1836,8 @@ const HomePage = () => {
       message: string,
       reason: AccessRestrictionReason = 'unavailable',
     ) => {
-      if (currentCode) recordAccessRestriction(currentCode, reason)
+      if (!currentCode || activeCodeRef.current !== currentCode) return
+      recordAccessRestriction(currentCode, reason)
       await patchVerge({ enable_tun_mode: false }).catch(() => undefined)
       await toggleSystemProxy(false).catch(() => undefined)
       await stopCore().catch(() => undefined)
@@ -1897,6 +1913,7 @@ const HomePage = () => {
           } | null
         } | null
         if (
+          activeCodeRef.current !== value ||
           managedAuthRef.current?.accessCode !== value ||
           managedAuthRef.current?.deviceToken !== auth.deviceToken
         )
@@ -1981,6 +1998,7 @@ const HomePage = () => {
         message?: string
         expires_at?: string | null
       } | null
+      if (activeCodeRef.current !== value) return
       if (!response.ok || !data?.ok) {
         if (response.status === 429) {
           markPresenceRateLimited(
@@ -2073,6 +2091,7 @@ const HomePage = () => {
         } | null
         if (signal.aborted) throw new ManagedTrafficReportError('timeout')
         if (
+          activeCodeRef.current !== value ||
           managedAuthRef.current?.accessCode !== value ||
           managedAuthRef.current?.deviceToken !== auth.deviceToken
         )
@@ -2131,6 +2150,7 @@ const HomePage = () => {
         }
         return { status: 'acknowledged', sequence: acknowledged.sequence }
       }
+      if (activeCodeRef.current !== value) return { status: 'inactive' }
       const previous = lastReportedTrafficRef.current
       if (
         current.upload < previous.upload ||
@@ -2624,6 +2644,7 @@ const HomePage = () => {
       const originalDeviceToken = managedAuthRef.current?.deviceToken
       const assertAccountCurrent = () => {
         if (
+          activeCodeRef.current !== currentCode ||
           localStorage.getItem(CODE_STORAGE_KEY) !== currentCode ||
           (originalDeviceToken &&
             managedAuthRef.current?.deviceToken !== originalDeviceToken)
@@ -2870,7 +2891,7 @@ const HomePage = () => {
     if (busy) return
     const disconnected = previousRunningRef.current && !running
     previousRunningRef.current = running
-    if (!running) {
+    if (!running && !localWorkspace) {
       // eslint-disable-next-line @eslint-react/set-state-in-effect -- external disconnect must close the connected workspace.
       setAdvancedOpen(false)
       // eslint-disable-next-line @eslint-react/set-state-in-effect -- external disconnect must close the connected workspace.
@@ -2884,7 +2905,14 @@ const HomePage = () => {
     }
     if (disconnected && savedCode && current?.uid)
       void updateCurrentSubscription(true)
-  }, [busy, running, savedCode, current?.uid, updateCurrentSubscription])
+  }, [
+    busy,
+    running,
+    localWorkspace,
+    savedCode,
+    current?.uid,
+    updateCurrentSubscription,
+  ])
 
   // ===== 手动配置管理：应对 web 断网无法导入订阅时，自行导入/切换/编辑本地配置 =====
   // 只展示用户真正的配置文件（远程订阅 / 本地配置），隐藏到期占位配置、全局 Merge
@@ -2899,13 +2927,25 @@ const HomePage = () => {
   }, [expiredProfileUid, profiles?.items])
 
   const manualImportByUrl = useLockFn(async () => {
+    if (running) {
+      setStatus('请先停止代理，再导入或切换配置')
+      return
+    }
+    if (busy || manualBusy || refreshApplyInFlightRef.current) {
+      setStatus('正在完成配置操作，请稍后重试')
+      return
+    }
+    autoRefreshControllerRef.current?.abort()
     const url = manualImportUrl.trim()
     if (!url) {
       setStatus('请输入订阅链接')
       return
     }
+    backgroundBusyRef.current = true
     setManualBusy(true)
     setStatus('正在导入订阅...')
+    const previousActiveCode = activeCodeRef.current
+    let selected = false
     try {
       const before = await getProfiles()
       const previousIds = new Set(
@@ -2921,6 +2961,7 @@ const HomePage = () => {
         .filter((item) => item.uid && !previousIds.has(item.uid))
         .slice(-1)[0]
       if (newest?.uid) {
+        activeCodeRef.current = ''
         const switched = await patchProfilesConfig({ current: newest.uid })
         if (!switched) {
           await deleteProfile(newest.uid).catch(() => undefined)
@@ -2929,18 +2970,83 @@ const HomePage = () => {
       } else {
         throw new Error('无法定位新导入的订阅')
       }
+      selected = true
       setManualImportUrl('')
       await mutateProfiles()
       await refreshAll()
       setStatus('订阅已导入并切换')
     } catch {
+      if (!selected) activeCodeRef.current = previousActiveCode
       setStatus('订阅导入失败，请检查链接后重试')
     } finally {
+      backgroundBusyRef.current = false
+      setManualBusy(false)
+    }
+  })
+
+  const manualImportFile = useLockFn(async (file: File, content: string) => {
+    if (running) {
+      setStatus('请先停止代理，再导入或切换配置')
+      return
+    }
+    if (busy || manualBusy || refreshApplyInFlightRef.current) {
+      setStatus('正在完成配置操作，请稍后重试')
+      return
+    }
+    backgroundBusyRef.current = true
+    setManualBusy(true)
+    autoRefreshControllerRef.current?.abort()
+    let createdUid: string | undefined
+    let selected = false
+    const previousActiveCode = activeCodeRef.current
+    try {
+      if (file.size > 8 * 1024 * 1024)
+        throw new Error('配置文件请控制在 8MB 以内')
+      const document = yaml.load(content)
+      if (!document || typeof document !== 'object' || Array.isArray(document))
+        throw new Error('请选择有效的 Clash YAML 配置文件')
+      const before = await getProfiles()
+      const previousIds = new Set((before.items || []).map((item) => item.uid))
+      await createProfile(
+        {
+          type: 'local',
+          name: file.name,
+          desc: '手动导入的本地 Clash 配置',
+          option: { with_proxy: false, self_proxy: false },
+        } as IProfileItem,
+        content,
+      )
+      const after = await getProfiles()
+      createdUid = (after.items || []).find(
+        (item) => item.uid && !previousIds.has(item.uid),
+      )?.uid
+      activeCodeRef.current = ''
+      if (!createdUid || !(await patchProfilesConfig({ current: createdUid })))
+        throw new Error('配置验证失败，已保留原配置')
+      selected = true
+      await mutateProfiles()
+      await refreshAll()
+      setStatus('文件已导入并选中，点击启动后生效')
+    } catch (error) {
+      if (!selected) activeCodeRef.current = previousActiveCode
+      if (createdUid && !selected)
+        await deleteProfile(createdUid).catch(() => undefined)
+      setStatus(
+        error instanceof Error ? error.message : '文件导入失败，已保留原配置',
+      )
+    } finally {
+      backgroundBusyRef.current = false
       setManualBusy(false)
     }
   })
 
   const manualCreateLocal = useLockFn(async () => {
+    if (busy || manualBusy || refreshApplyInFlightRef.current) {
+      setStatus('正在完成配置操作，请稍后重试')
+      return
+    }
+    autoRefreshControllerRef.current?.abort()
+    backgroundBusyRef.current = true
     setManualBusy(true)
     setStatus('正在新建本地配置...')
     try {
@@ -2960,26 +3066,47 @@ const HomePage = () => {
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error))
     } finally {
+      backgroundBusyRef.current = false
       setManualBusy(false)
     }
   })
 
   const manualSwitch = useLockFn(async (uid: string) => {
+    if (running) {
+      setStatus('请先停止代理，再导入或切换配置')
+      return
+    }
+    if (busy || manualBusy || refreshApplyInFlightRef.current) {
+      setStatus('正在完成配置操作，请稍后重试')
+      return
+    }
+    autoRefreshControllerRef.current?.abort()
+    backgroundBusyRef.current = true
     setManualBusy(true)
+    const previousActiveCode = activeCodeRef.current
     try {
+      activeCodeRef.current = ''
       const switched = await patchProfilesConfig({ current: uid })
       if (!switched) throw new Error('配置验证失败，仍使用原配置')
       await mutateProfiles()
       await refreshAll()
       setStatus('已切换配置文件')
     } catch (error) {
+      activeCodeRef.current = previousActiveCode
       setStatus(error instanceof Error ? error.message : String(error))
     } finally {
+      backgroundBusyRef.current = false
       setManualBusy(false)
     }
   })
 
   const manualDelete = useLockFn(async (uid: string) => {
+    if (busy || manualBusy || refreshApplyInFlightRef.current) {
+      setStatus('正在完成配置操作，请稍后重试')
+      return
+    }
+    autoRefreshControllerRef.current?.abort()
+    backgroundBusyRef.current = true
     setManualBusy(true)
     try {
       await deleteProfile(uid)
@@ -3005,6 +3132,7 @@ const HomePage = () => {
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error))
     } finally {
+      backgroundBusyRef.current = false
       setManualBusy(false)
     }
   })
@@ -3020,6 +3148,13 @@ const HomePage = () => {
 
   const manualSaveEdit = useLockFn(async () => {
     if (!editorState) return
+    if (busy || manualBusy || refreshApplyInFlightRef.current) {
+      setStatus('正在完成配置操作，请稍后再保存')
+      return
+    }
+    autoRefreshControllerRef.current?.abort()
+    backgroundBusyRef.current = true
+    setManualBusy(true)
     try {
       const saved = await saveProfileFile(editorState.uid, editorState.value)
       if (!saved) throw new Error('配置验证失败，已恢复保存前内容')
@@ -3041,6 +3176,9 @@ const HomePage = () => {
       setEditorState(null)
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error))
+    } finally {
+      backgroundBusyRef.current = false
+      setManualBusy(false)
     }
   })
 
@@ -3071,6 +3209,10 @@ const HomePage = () => {
   }, [])
 
   const togglePower = useLockFn(async () => {
+    if (manualBusy) {
+      setStatus('正在保存配置，请稍后再启动')
+      return
+    }
     if (refreshApplyInFlightRef.current) {
       setStatus('正在完成节点配置更新，请稍后再试')
       return
@@ -3556,6 +3698,20 @@ const HomePage = () => {
   }, [importManagedRequest])
 
   const importByCode = useLockFn(async (startAfterImport = false) => {
+    if (isLocalSettingsCommand(code)) {
+      if (busy || manualBusy || refreshApplyInFlightRef.current) {
+        setCodeImportMessage('正在完成配置操作，请稍后再试')
+        return
+      }
+      setLocalWorkspace(true)
+      setAdvancedOpen(true)
+      setCodeDialogOpen(false)
+      setCode('')
+      setCodeImportPhase('input')
+      setCodeImportMessage('')
+      setStatus('已进入本机高级模式，可先管理配置，再点击启动')
+      return
+    }
     if (refreshApplyInFlightRef.current) {
       setCodeImportMessage('正在完成节点配置更新，请稍后再试')
       return
@@ -4529,6 +4685,54 @@ const HomePage = () => {
             flexShrink: 0,
           }}
         >
+          {localWorkspace && (
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{ alignItems: 'center', flexWrap: 'wrap' }}
+            >
+              <Chip label="本机高级模式" size="small" />
+              <Typography variant="body2" sx={{ flex: 1, color: '#33406e' }}>
+                {current?.name || '请导入或选择配置'}
+              </Typography>
+              <Button
+                disabled={busy || manualBusy}
+                onClick={() => setProfileManagerOpen(true)}
+              >
+                配置管理
+              </Button>
+              <Button
+                disabled={busy || manualBusy}
+                onClick={() => setAdvancedOpen(true)}
+              >
+                高级设置
+              </Button>
+              <Button
+                disabled={busy || manualBusy}
+                onClick={() => {
+                  setLocalWorkspace(false)
+                  setAdvancedOpen(false)
+                  setProfileManagerOpen(false)
+                  setEditorState(null)
+                  setStatus('')
+                }}
+              >
+                退出高级模式
+              </Button>
+            </Stack>
+          )}
+          {currentCode && (
+            <Typography
+              role="status"
+              sx={{
+                fontSize: 13,
+                color: codeExpired ? '#973f38' : '#33406e',
+                px: 1,
+              }}
+            >
+              {accountExpiryLabel(expiresAt)}
+            </Typography>
+          )}
           {!showConnectionOptions ? (
             <Paper
               elevation={0}
@@ -5066,7 +5270,12 @@ const HomePage = () => {
                   </Box>
                 )}
 
-                {clientAccountState && (
+                {currentCode && (
+                  <Typography sx={{ fontSize: 13 }}>
+                    {accountExpiryLabel(expiresAt)}
+                  </Typography>
+                )}
+                {currentCode && clientAccountState?.showUsage && (
                   <Paper
                     elevation={0}
                     sx={{
@@ -6305,6 +6514,18 @@ const HomePage = () => {
                     导入
                   </Button>
                 </Stack>
+                <Box
+                  sx={{
+                    pointerEvents: manualBusy || busy ? 'none' : 'auto',
+                    opacity: manualBusy ? 0.5 : 1,
+                  }}
+                >
+                  <FileInput
+                    onChange={(file, content) => {
+                      void manualImportFile(file, content)
+                    }}
+                  />
+                </Box>
                 <Button
                   size="small"
                   variant="outlined"

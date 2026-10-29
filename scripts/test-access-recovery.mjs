@@ -64,6 +64,7 @@ const ports = () => {
     events,
     storage,
     currentCode: 'fixture',
+    activeCodeRef: { current: 'fixture' },
     current: { uid: 'fixture-profile' },
     expiresAt: '2030-01-01 00:00:00',
     running: false,

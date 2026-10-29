@@ -29,7 +29,7 @@
     "format": "biome format --write .",
     "format:check": "biome format .",
     "test:import-health": "node --test scripts/test-import-node-health.mjs",
-    "test:subscription-refresh": "node --test scripts/test-subscription-refresh.mjs scripts/test-access-recovery.mjs",
+    "test:subscription-refresh": "node --test scripts/test-subscription-refresh.mjs scripts/test-access-recovery.mjs scripts/test-local-workspace.mjs",
     "test:startup-refresh": "node --experimental-strip-types --test scripts/test-http-request-deadline.mjs scripts/test-subscription-content.mjs scripts/test-home-node-order.mjs",
     "test:managed-subscription": "node --experimental-strip-types --test scripts/test-managed-subscription.mjs",
     "test:managed-traffic": "node --experimental-strip-types --test scripts/test-http-request-init.mjs scripts/test-managed-traffic-counter.mjs scripts/test-managed-traffic-diagnostics.mjs scripts/test-managed-traffic-scheduler.mjs",
