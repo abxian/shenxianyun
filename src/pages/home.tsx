@@ -154,23 +154,32 @@ import {
   shouldSendPresence,
 } from '@/services/presence-throttle'
 import {
+  createSubscriptionMonitor,
+  type SubscriptionMonitor,
+} from '@/services/subscription-monitor'
+import {
   downloadAndInstallWithFallback,
   SHENXIANYUN_RELEASES_URL,
 } from '@/services/update'
 import { VISIBLE_APP_NAME } from '@/services/visible-brand'
+import {
+  needsSubscriptionRefresh,
+  parseAccessRestriction,
+  restrictionReason,
+  type AccessRestriction,
+  type AccessRestrictionReason,
+} from '@/utils/access-recovery'
 import getSystem from '@/utils/get-system'
 import { isAutomaticNode, sortHomeNodes } from '@/utils/home-node-order'
 import { homeStatusMessage } from '@/utils/home-status'
 import { prepareSubscriptionContent } from '@/utils/subscription-content'
-import {
-  planSubscriptionRefresh,
-  type SubscriptionRefreshReason,
-} from '@/utils/subscription-refresh'
 import { version as desktopBuildVersion } from '@root/package.json'
 
 const CODE_STORAGE_KEY = 'shenxianyun.accessCode'
 const CODE_EXPIRES_STORAGE_KEY = 'shenxianyun.accessExpiresAt'
 const CODE_UPDATE_VERSION_STORAGE_KEY = 'shenxianyun.updateVersion'
+const CODE_REVISION_STORAGE_KEY = 'shenxianyun.subscriptionRevision.v1'
+const ACCESS_RESTRICTION_STORAGE_KEY = 'shenxianyun.accessRestriction.v1'
 const STARTUP_REFRESH_SESSION_KEY = 'shenxianyun.startupSubscriptionRefresh.v1'
 const CLIENT_ID_STORAGE_KEY = 'shenxianyun.clientId'
 const PENDING_PRESENCE_STORAGE_KEY = 'shenxianyun.pendingPresence.v1'
@@ -185,11 +194,7 @@ const DELAY_TIMEOUT = 5000
 // 服务端以 5 分钟内 last_seen 判断在线。即使漏掉一轮，下一轮仍在在线窗口内。
 const HEARTBEAT_INTERVAL_MS = 120_000
 const HEARTBEAT_JITTER_MS = 20_000
-const ACCOUNT_STATE_SYNC_INTERVAL_MS = 60_000
 const MAX_TRAFFIC_REPORT_DELTA = 5 * 1024 * 1024 * 1024
-// 订阅更新轮询：仅在已连接时运行，基础间隔 10 分钟，失败时指数退避到最多 1 小时。
-const UPDATE_POLL_BASE_MS = 600_000
-const UPDATE_POLL_MAX_MS = 3_600_000
 const EXPIRED_NODE_NAME = '提取码到期，请续费使用'
 const EXPIRED_PROFILE_NAME = '提取码已到期'
 
@@ -407,6 +412,8 @@ type ManagedInstallTransaction = {
 }
 
 type UpdateStateResponse = {
+  code?: string
+  subscription_revision?: string
   ok?: boolean
   update_version?: number
   expires_at?: string | null
@@ -552,6 +559,7 @@ class AccessCodeStateError extends Error {
   constructor(
     message: string,
     readonly serverRejected = false,
+    readonly stateCode?: string,
   ) {
     super(message)
   }
@@ -809,6 +817,18 @@ const HomePage = () => {
   const [expiresAt, setExpiresAt] = useState(
     () => localStorage.getItem(CODE_EXPIRES_STORAGE_KEY) || '',
   )
+  const [accessRestriction, setAccessRestriction] = useState(() =>
+    parseAccessRestriction(
+      localStorage.getItem(ACCESS_RESTRICTION_STORAGE_KEY),
+      savedCode,
+    ),
+  )
+  const restrictionRef = useRef<AccessRestriction | null>(accessRestriction)
+  const subscriptionMonitorRef = useRef<SubscriptionMonitor | null>(null)
+  const subscriptionCheckRef = useRef<
+    ((signal: AbortSignal) => Promise<void>) | null
+  >(null)
+  const backgroundBusyRef = useRef(false)
   const [status, setStatus] = useState(
     savedCode ? '提取码已保存，会自动检查订阅更新。' : '',
   )
@@ -858,6 +878,9 @@ const HomePage = () => {
   const [desktopUpdate, setDesktopUpdate] =
     useState<DesktopVersionResponse | null>(null)
   const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    backgroundBusyRef.current = busy
+  }, [busy])
   const [modeOverride, setModeOverride] = useState('')
   const [updating, setUpdating] = useState(false)
   const [updPercent, setUpdPercent] = useState(0)
@@ -1033,6 +1056,36 @@ const HomePage = () => {
     savedCode && code.trim() && code.trim() !== savedCode,
   )
   const codeExpired = Boolean(expiresAt && nowMs > parseExpireTime(expiresAt))
+  const activeRestriction =
+    accessRestriction?.accessCode === currentCode ? accessRestriction : null
+  const showRenewal = Boolean(
+    currentCode &&
+      (codeExpired ||
+        activeRestriction?.reason === 'expired' ||
+        activeRestriction?.reason === 'traffic_limit'),
+  )
+  const recordAccessRestriction = useCallback(
+    (value: string, reason: AccessRestrictionReason) => {
+      const next = { accessCode: value, reason }
+      localStorage.setItem(ACCESS_RESTRICTION_STORAGE_KEY, JSON.stringify(next))
+      restrictionRef.current = next
+      setAccessRestriction(next)
+    },
+    [],
+  )
+  const clearAccessRestriction = useCallback((value: string) => {
+    if (restrictionRef.current?.accessCode !== value) return
+    localStorage.removeItem(ACCESS_RESTRICTION_STORAGE_KEY)
+    restrictionRef.current = null
+    setAccessRestriction(null)
+  }, [])
+  const openRenewal = useCallback(
+    () =>
+      openWebUrl(
+        `${managedAuthRef.current?.apiBase || getApiBase()}/pay?action=renew&code=${encodeURIComponent(currentCode || savedCode)}`,
+      ),
+    [currentCode, savedCode],
+  )
   const allowLanOn = clash?.['allow-lan'] ?? false
   const externalControllerOn = verge?.enable_external_controller ?? false
   const dnsOverwriteOn = verge?.enable_dns_settings ?? false
@@ -1529,10 +1582,19 @@ const HomePage = () => {
       )
       const data = (await response.json()) as UpdateStateResponse
       if (!response.ok || !data.ok) {
-        throw new AccessCodeStateError(
-          data.message || '提取码已失效或过期',
-          true,
-        )
+        if (response.status === 404 || response.status === 403) {
+          throw new AccessCodeStateError(
+            data.message || '提取码暂不可用',
+            true,
+            data.code,
+          )
+        }
+        const error = new Error('订阅状态检查暂不可用') as Error & {
+          retryAfterMs?: number
+        }
+        error.retryAfterMs =
+          Math.max(0, Number(response.headers.get('Retry-After')) || 0) * 1000
+        throw error
       }
       return data
     },
@@ -1616,13 +1678,23 @@ const HomePage = () => {
         suppressValidationNotice?: boolean
         signal?: AbortSignal
         background?: boolean
+        allowInactive?: boolean
       },
     ): Promise<ManagedProfileUpdateResult> => {
       const force = options?.force ?? false
       const suppressValidationNotice =
         options?.suppressValidationNotice ?? false
       const auth = managedAuthRef.current
-      if (!auth || auth.profileUid !== current?.uid) return 'unmanaged'
+      if (
+        !auth ||
+        (auth.profileUid !== current?.uid &&
+          !(
+            options?.allowInactive &&
+            auth.profileUid === codeProfileUid &&
+            current?.uid === expiredProfileUid
+          ))
+      )
+        return 'unmanaged'
       const commitAuth = async (next: ManagedAuth) => {
         assertRequestActive(options?.signal)
         if (managedAuthRef.current !== auth)
@@ -1734,18 +1806,35 @@ const HomePage = () => {
       }
       return 'managed-updated'
     },
-    [current?.uid, fetchManagedSubscription, persistManagedAuth, setStatus],
+    [
+      current?.uid,
+      codeProfileUid,
+      expiredProfileUid,
+      fetchManagedSubscription,
+      persistManagedAuth,
+      setStatus,
+    ],
   )
 
   const stopForServerLimit = useCallback(
-    async (message: string) => {
+    async (
+      message: string,
+      reason: AccessRestrictionReason = 'unavailable',
+    ) => {
+      if (currentCode) recordAccessRestriction(currentCode, reason)
       await patchVerge({ enable_tun_mode: false }).catch(() => undefined)
       await toggleSystemProxy(false).catch(() => undefined)
       await stopCore().catch(() => undefined)
       await invalidateProxyState().catch(() => undefined)
       setStatus(message)
     },
-    [invalidateProxyState, patchVerge, toggleSystemProxy],
+    [
+      currentCode,
+      recordAccessRestriction,
+      invalidateProxyState,
+      patchVerge,
+      toggleSystemProxy,
+    ],
   )
 
   const sendClientPresence = useCallback(
@@ -1807,6 +1896,11 @@ const HomePage = () => {
             download_url?: string
           } | null
         } | null
+        if (
+          managedAuthRef.current?.accessCode !== value ||
+          managedAuthRef.current?.deviceToken !== auth.deviceToken
+        )
+          return
         if (!response.ok || !data?.ok) {
           // 429 是反代的限流，不是业务错误：按 Retry-After 退避，别继续打。
           // 反代已配置 limit_req_status 429 + Retry-After。
@@ -1831,13 +1925,15 @@ const HomePage = () => {
                   : data.code === 'bound_limit'
                     ? '绑定设备数量已达到套餐上限，代理已停止'
                     : '在线设备数量已达到套餐上限，代理已停止'),
+              data.code === 'traffic_limit' ? 'traffic_limit' : 'unavailable',
             )
           }
           throw new Error(data?.message || '设备状态上报失败')
         }
         markPresenceAccepted(throttle)
         if (online) {
-          await syncExpiresAt(data.expires_at)
+          if (!updateInFlightRef.current && !backgroundBusyRef.current)
+            await syncExpiresAt(data.expires_at)
           setClientAccountState({
             dayUsed: Number(data.day_used) || 0,
             monthUsed: Number(data.month_used) || 0,
@@ -1899,7 +1995,8 @@ const HomePage = () => {
         )
       }
       markPresenceAccepted(throttle)
-      if (online) await syncExpiresAt(data.expires_at)
+      if (online && !updateInFlightRef.current && !backgroundBusyRef.current)
+        await syncExpiresAt(data.expires_at)
       clearPendingPresence(pending.id)
     },
     [apiFetch, currentCode, stopForServerLimit, syncExpiresAt],
@@ -1975,6 +2072,11 @@ const HomePage = () => {
           month_limit?: number
         } | null
         if (signal.aborted) throw new ManagedTrafficReportError('timeout')
+        if (
+          managedAuthRef.current?.accessCode !== value ||
+          managedAuthRef.current?.deviceToken !== auth.deviceToken
+        )
+          return { status: 'inactive' }
         if (response.status === 429 || response.status === 503) {
           const retryAfterSeconds = Number(response.headers.get('Retry-After'))
           trafficReportRetryAfterRef.current = Number.isFinite(
@@ -1998,6 +2100,7 @@ const HomePage = () => {
             pendingManagedTrafficRef.current = undefined
             await stopForServerLimit(
               data.message || '流量额度已用尽，代理已停止',
+              'traffic_limit',
             )
           }
           throw managedTrafficResponseError(response.status, data?.code)
@@ -2155,7 +2258,7 @@ const HomePage = () => {
         {
           type: 'local',
           name: EXPIRED_PROFILE_NAME,
-          desc: '续费并重新导入提取码后自动恢复',
+          desc: '续费后自动检查并恢复订阅',
           url: '',
           option: { with_proxy: false, self_proxy: false },
         } as IProfileItem,
@@ -2182,44 +2285,93 @@ const HomePage = () => {
     return Boolean(uid && current?.uid === uid)
   }, [current?.uid])
 
-  // 续费恢复：重新校验提取码（不计入导入次数），成功则重新导入正式订阅并删除占位配置。
-  const recoverFromExpired = useCallback(async () => {
-    const value = savedCode
-    if (!value) return false
-    const expiredUid = localStorage.getItem(EXPIRED_PROFILE_UID_KEY) || ''
-    const apiBase = managedAuthRef.current?.apiBase || getApiBase()
-    const ticket = await requestImportTicket(value, apiBase)
-    const exchange = await exchangeImportTicket({
-      ticket,
-      apiBase,
-      name: value,
-    })
-    const transaction = await installManagedSubscription(
-      value,
-      exchange,
-      apiBase,
-    )
-    await transaction.commit()
-    if (expiredUid) {
-      try {
-        await deleteProfile(expiredUid)
-        localStorage.removeItem(EXPIRED_PROFILE_UID_KEY)
-        setExpiredProfileUid('')
-      } catch {
-        // 保留 UID 继续隐藏占位配置，下次恢复或手动删除时再清理。
+  // Keep the original managed URL/device credential across renewal. Only
+  // legacy installations without credentials need an automatic ticket exchange.
+  const recoverFromExpired = useCallback(
+    async (
+      remoteVersion: number,
+      signal?: AbortSignal,
+    ): Promise<ManagedProfileUpdateResult> => {
+      const value = savedCode
+      if (!value) throw new Error('尚未绑定提取码')
+      const expiredUid = localStorage.getItem(EXPIRED_PROFILE_UID_KEY) || ''
+      const auth = managedAuthRef.current
+      let result: ManagedProfileUpdateResult = 'managed-updated'
+      if (auth?.accessCode === value && auth.profileUid === codeProfileUid) {
+        result = await updateManagedProfile(remoteVersion, {
+          allowInactive: true,
+          signal,
+          background: true,
+          suppressValidationNotice: true,
+        })
+        if (result === 'unmanaged')
+          throw new Error('受管订阅身份已变化，稍后自动重试')
+        assertRequestActive(signal)
+        if (current?.uid === expiredUid && auth.profileUid !== expiredUid) {
+          refreshApplyInFlightRef.current = true
+          setBusy(true)
+          try {
+            if (!(await patchProfilesConfig({ current: auth.profileUid })))
+              throw new Error('正常订阅未能恢复，已保留原配置')
+          } finally {
+            refreshApplyInFlightRef.current = false
+            setBusy(false)
+          }
+        }
+      } else {
+        assertRequestActive(signal)
+        refreshApplyInFlightRef.current = true
+        setBusy(true)
+        try {
+          const apiBase = auth?.apiBase || getApiBase()
+          const ticket = await requestImportTicket(value, apiBase)
+          assertRequestActive(signal)
+          const exchange = await exchangeImportTicket({
+            ticket,
+            apiBase,
+            name: value,
+          })
+          assertRequestActive(signal)
+          const transaction = await installManagedSubscription(
+            value,
+            exchange,
+            apiBase,
+          )
+          try {
+            await transaction.commit()
+          } catch (error) {
+            await transaction.rollback()
+            throw error
+          }
+        } finally {
+          refreshApplyInFlightRef.current = false
+          setBusy(false)
+        }
       }
-    }
-    await mutateProfiles()
-    await refreshAll()
-    return true
-  }, [
-    exchangeImportTicket,
-    installManagedSubscription,
-    mutateProfiles,
-    refreshAll,
-    requestImportTicket,
-    savedCode,
-  ])
+      if (expiredUid) {
+        await deleteProfile(expiredUid)
+          .then(() => {
+            localStorage.removeItem(EXPIRED_PROFILE_UID_KEY)
+            setExpiredProfileUid('')
+          })
+          .catch(() => undefined)
+      }
+      void mutateProfiles().catch(() => undefined)
+      void refreshAll().catch(() => undefined)
+      return result
+    },
+    [
+      codeProfileUid,
+      current?.uid,
+      exchangeImportTicket,
+      installManagedSubscription,
+      mutateProfiles,
+      refreshAll,
+      requestImportTicket,
+      savedCode,
+      updateManagedProfile,
+    ],
+  )
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 60_000)
@@ -2381,36 +2533,6 @@ const HomePage = () => {
     }
   }, [currentCode, stableRunning])
 
-  // 核心停止时不应发送“在线”心跳，但仍需让网站续费结果及时反映到客户端。
-  // 这里只读取轻量状态，不下载订阅；窗口重新获得焦点时立即同步，前台停留时最多等待一分钟。
-  useEffect(() => {
-    if (!currentCode || running) return
-
-    const syncAccountState = () => {
-      if (document.visibilityState === 'hidden' || updateInFlightRef.current) {
-        return
-      }
-      updateState(currentCode)
-        .then((state) => syncExpiresAt(state.expires_at))
-        .catch(() => undefined)
-    }
-    const syncWhenVisible = () => {
-      if (document.visibilityState === 'visible') syncAccountState()
-    }
-
-    const timer = window.setInterval(
-      syncAccountState,
-      ACCOUNT_STATE_SYNC_INTERVAL_MS,
-    )
-    window.addEventListener('focus', syncAccountState)
-    document.addEventListener('visibilitychange', syncWhenVisible)
-    return () => {
-      window.clearInterval(timer)
-      window.removeEventListener('focus', syncAccountState)
-      document.removeEventListener('visibilitychange', syncWhenVisible)
-    }
-  }, [currentCode, running, syncExpiresAt, updateState])
-
   useEffect(() => {
     if (!managedAuthReady || !currentCode) {
       trafficCounterRef.current = null
@@ -2495,62 +2617,43 @@ const HomePage = () => {
     }
   }, [currentCode, managedAuthReady, stableRunning])
 
-  // 每个客户端进程启动后刷新一次订阅；后续只在已连接时轻量检查服务端版本。
-  // 定时检查不会盲目下载整份订阅，失败时指数退避并叠加抖动，避免惊群。
-  useEffect(() => {
-    // 等当前配置真正加载完成后才消费“一次启动刷新”标记，避免启动时序较慢时漏刷。
-    if (!managedAuthReady || !currentCode || !current?.uid) return
-
-    let startupRefreshPending = !startupRefreshCompletedRef.current
-    try {
-      if (sessionStorage.getItem(STARTUP_REFRESH_SESSION_KEY) === 'done')
-        startupRefreshPending = false
-    } catch {
-      /* use process-local completion when sessionStorage is unavailable */
-    }
-    if (!startupRefreshPending && !running) return
-
-    let cancelled = false
-    let timer: number | undefined
-    let failures = 0
-
-    // 返回 true 表示本轮网络请求成功（用于复位退避）。
-    const checkOnce = async (
-      refreshAtStartup: boolean,
-      signal: AbortSignal,
-    ): Promise<boolean> => {
-      assertRequestActive(signal)
-      // 处于到期占位配置时，低频探测提取码是否已续费，成功则自动恢复正式订阅。
-      if (onExpiredProfile()) {
-        refreshApplyInFlightRef.current = true
-        setBusy(true)
-        try {
-          const recovered = await recoverFromExpired()
-          if (recovered) {
-            setExpiredDialogOpen(false)
-            setStatus('提取码已续费，订阅已自动恢复')
-          }
-          return true
-        } catch (error) {
-          // 仍未续费/服务器拒绝 → 保持占位配置；网络错误则交给退避。
-          if (error instanceof AccessCodeStateError) return true
-          throw error
-        } finally {
-          refreshApplyInFlightRef.current = false
-          setBusy(false)
-        }
-      }
-
-      let refreshReason: SubscriptionRefreshReason | null = null
+  const checkSubscriptionRecovery = useCallback(
+    async (signal: AbortSignal) => {
+      if (!currentCode || !current?.uid) return
+      updateInFlightRef.current = true
       try {
         const state = await updateState(currentCode, signal)
         assertRequestActive(signal)
-        // Expiry metadata is also a write: retain ownership until persistence
-        // finishes so a foreground import cannot be overwritten by this check.
-        if (
+        const wasRestricted =
+          restrictionRef.current?.accessCode === currentCode ||
+          onExpiredProfile()
+        const expiryChanged =
           state.expires_at !== undefined &&
           (state.expires_at?.trim() || '') !== expiresAt
-        ) {
+        const localVersion = Number(
+          localStorage.getItem(CODE_UPDATE_VERSION_STORAGE_KEY) || 0,
+        )
+        const remoteVersion = Number(state.update_version || 0)
+        let cachedRevision = ''
+        try {
+          const cached = JSON.parse(
+            localStorage.getItem(CODE_REVISION_STORAGE_KEY) || 'null',
+          )
+          if (cached?.accessCode === currentCode)
+            cachedRevision = cached.revision || ''
+        } catch {
+          /* migrate the old timestamp cache once */
+        }
+        const needsRefresh = needsSubscriptionRefresh({
+          startup: !startupRefreshCompletedRef.current,
+          recovering: wasRestricted,
+          expiryChanged,
+          remoteVersion,
+          localVersion,
+          remoteRevision: state.subscription_revision,
+          localRevision: cachedRevision,
+        })
+        if (expiryChanged) {
           refreshApplyInFlightRef.current = true
           setBusy(true)
           try {
@@ -2561,27 +2664,19 @@ const HomePage = () => {
           }
         }
         assertRequestActive(signal)
-        const remoteVersion = Number(state.update_version || 0)
-        const localVersion = Number(
-          localStorage.getItem(CODE_UPDATE_VERSION_STORAGE_KEY) || 0,
-        )
-        refreshReason = planSubscriptionRefresh({
-          hasCurrentProfile: Boolean(current?.uid),
-          startupRefreshPending: refreshAtStartup,
-          remoteVersion,
-          localVersion,
-        })
-        if (refreshReason) {
-          setStatus(
-            refreshReason === 'startup'
-              ? '客户端已启动，正在刷新订阅...'
-              : '检测到后台推送，正在更新订阅...',
+        if (needsRefresh) {
+          let result: ManagedProfileUpdateResult
+          if (
+            onExpiredProfile() ||
+            ((wasRestricted || expiryChanged) && !managedAuthRef.current)
           )
-          const result = await updateManagedProfile(remoteVersion, {
-            suppressValidationNotice: true,
-            signal,
-            background: true,
-          })
+            result = await recoverFromExpired(remoteVersion, signal)
+          else
+            result = await updateManagedProfile(remoteVersion, {
+              signal,
+              background: true,
+              suppressValidationNotice: true,
+            })
           if (result === 'unmanaged') {
             assertRequestActive(signal)
             refreshApplyInFlightRef.current = true
@@ -2593,133 +2688,128 @@ const HomePage = () => {
               setBusy(false)
             }
           }
-          localStorage.setItem(
-            CODE_UPDATE_VERSION_STORAGE_KEY,
-            String(Math.max(localVersion, remoteVersion)),
-          )
+          // Never consume a revision for a failed or intentionally detached update.
           if (result !== 'managed-detached') {
-            void mutateProfiles().catch(() => undefined)
-            // The subscription transaction is complete. Read-only UI queries may
-            // be slow during core recovery and must not hold its startup marker.
-            void refreshAll().catch(() => undefined)
+            localStorage.setItem(
+              CODE_UPDATE_VERSION_STORAGE_KEY,
+              String(remoteVersion),
+            )
+            if (state.subscription_revision)
+              localStorage.setItem(
+                CODE_REVISION_STORAGE_KEY,
+                JSON.stringify({
+                  accessCode: currentCode,
+                  revision: state.subscription_revision,
+                }),
+              )
+            startupRefreshCompletedRef.current = true
+            try {
+              sessionStorage.setItem(STARTUP_REFRESH_SESSION_KEY, 'done')
+            } catch {
+              /* optional cache */
+            }
             setStatus(
-              result === 'managed-unchanged'
-                ? '当前节点已是最新'
-                : refreshReason === 'startup'
-                  ? '启动订阅刷新完成'
-                  : '订阅已更新',
+              wasRestricted ? '订阅已恢复，可以启动' : '当前节点已是最新',
             )
           }
+          void mutateProfiles().catch(() => undefined)
+          void refreshAll().catch(() => undefined)
         }
-        return true
+        clearAccessRestriction(currentCode)
+        setExpiredDialogOpen(false)
       } catch (error) {
         if (signal.aborted) throw error
-        const blockedByServer =
-          error instanceof AccessCodeStateError && error.serverRejected
-        const blockedByLocalExpire = Boolean(
-          expiresAt && Date.now() > parseExpireTime(expiresAt),
-        )
-
-        // 已到期：切换到占位配置并弹窗提示续费（保持连接而非直接断开）。
-        if (blockedByServer || blockedByLocalExpire) {
-          refreshApplyInFlightRef.current = true
-          setBusy(true)
-          try {
-            await activateExpiredProfile().catch(() => {})
-          } finally {
-            refreshApplyInFlightRef.current = false
-            setBusy(false)
+        if (error instanceof AccessCodeStateError && error.serverRejected) {
+          const reason = error.stateCode
+            ? restrictionReason(error.stateCode)
+            : expiresAt && Date.now() > parseExpireTime(expiresAt)
+              ? 'expired'
+              : 'unavailable'
+          recordAccessRestriction(currentCode, reason)
+          // Existing connected clients fail closed. Never turn on a stopped VPN.
+          if (running) {
+            refreshApplyInFlightRef.current = true
+            setBusy(true)
+            try {
+              if (reason === 'expired')
+                await activateExpiredProfile().catch(() => undefined)
+              await stopForServerLimit(error.message, reason)
+            } finally {
+              refreshApplyInFlightRef.current = false
+              setBusy(false)
+            }
           }
-          setExpiredDialogOpen(true)
-          setStatus('提取码已到期，请续费后重新使用')
-          return true
+          setStatus(error.message)
+          return
         }
-        if (refreshReason) {
-          console.warn('自动订阅刷新失败，已继续使用原订阅', error)
-          setStatus('新订阅暂不可用，已继续使用原订阅')
-        } else if (refreshAtStartup) {
-          setStatus('启动订阅检查未完成，将在后台重试')
-        }
-        // 纯网络错误：抛出以触发退避。
+        if (restrictionRef.current?.accessCode === currentCode)
+          setStatus('恢复订阅暂未完成，将自动重试')
+        if (!(error instanceof AccessCodeStateError))
+          void rotateApiBase(proxyUrlRef.current || undefined).catch(
+            () => undefined,
+          )
         throw error
-      }
-    }
-
-    const schedule = (refreshAtStartup = false) => {
-      if (cancelled) return
-      const backoff = Math.min(
-        UPDATE_POLL_BASE_MS * 2 ** failures,
-        UPDATE_POLL_MAX_MS,
-      )
-      // 50%~100% 抖动，打散客户端请求时间，避免惊群。
-      const delay = backoff * (0.5 + Math.random() * 0.5)
-      timer = window.setTimeout(() => run(refreshAtStartup), delay)
-    }
-
-    const run = async (refreshAtStartup = false) => {
-      if (cancelled) return
-      if (refreshAtStartup && startupRefreshCompletedRef.current) {
-        if (running) schedule()
-        return
-      }
-      if (updateInFlightRef.current || busy) {
-        schedule(refreshAtStartup)
-        return
-      }
-      updateInFlightRef.current = true
-      const controller = new AbortController()
-      autoRefreshControllerRef.current = controller
-      try {
-        await checkOnce(refreshAtStartup, controller.signal)
-        failures = 0
-        if (refreshAtStartup) {
-          startupRefreshCompletedRef.current = true
-          try {
-            sessionStorage.setItem(STARTUP_REFRESH_SESSION_KEY, 'done')
-          } catch {
-            /* memory guard remains */
-          }
-        }
-      } catch {
-        if (controller.signal.aborted) return
-        failures = Math.min(failures + 1, 4)
-        // 网络失败可能是当前 API 线路失联，后台切换到下一条候选线路。
-        rotateApiBase(proxyUrlRef.current || undefined).catch(() => undefined)
       } finally {
         updateInFlightRef.current = false
-        if (autoRefreshControllerRef.current === controller)
+        if (autoRefreshControllerRef.current?.signal === signal)
           autoRefreshControllerRef.current = null
       }
-      if (failures > 0 && refreshAtStartup) schedule(true)
-      else if (running) schedule()
-    }
+    },
+    [
+      activateExpiredProfile,
+      clearAccessRestriction,
+      current?.uid,
+      currentCode,
+      expiresAt,
+      mutateProfiles,
+      onExpiredProfile,
+      recordAccessRestriction,
+      recoverFromExpired,
+      refreshAll,
+      running,
+      stopForServerLimit,
+      syncExpiresAt,
+      updateCurrentProfileKeepingRules,
+      updateManagedProfile,
+      updateState,
+    ],
+  )
 
-    if (startupRefreshPending) {
-      void run(true)
-    } else {
-      schedule()
+  useEffect(() => {
+    subscriptionCheckRef.current = checkSubscriptionRecovery
+  }, [checkSubscriptionRecovery])
+  useEffect(() => {
+    if (!managedAuthReady || !currentCode || !current?.uid) return
+    const monitor = createSubscriptionMonitor({
+      check: (signal, controller) => {
+        autoRefreshControllerRef.current = controller
+        return subscriptionCheckRef.current?.(signal) ?? Promise.resolve()
+      },
+      canRun: () =>
+        !backgroundBusyRef.current &&
+        !updateInFlightRef.current &&
+        !refreshApplyInFlightRef.current,
+      intervalMs: () =>
+        document.visibilityState === 'hidden' ? 60_000 : 30_000,
+    })
+    subscriptionMonitorRef.current = monitor
+    const wake = () => monitor.wake()
+    const visible = () => {
+      if (document.visibilityState === 'visible') wake()
     }
+    monitor.start()
+    window.addEventListener('focus', wake)
+    window.addEventListener('online', wake)
+    document.addEventListener('visibilitychange', visible)
     return () => {
-      cancelled = true
-      if (timer) window.clearTimeout(timer)
+      monitor.stop()
+      if (subscriptionMonitorRef.current === monitor)
+        subscriptionMonitorRef.current = null
+      window.removeEventListener('focus', wake)
+      window.removeEventListener('online', wake)
+      document.removeEventListener('visibilitychange', visible)
     }
-  }, [
-    activateExpiredProfile,
-    current?.uid,
-    expiresAt,
-    managedAuthReady,
-    mutateProfiles,
-    onExpiredProfile,
-    recoverFromExpired,
-    refreshAll,
-    running,
-    currentCode,
-    syncExpiresAt,
-    updateCurrentProfileKeepingRules,
-    updateManagedProfile,
-    updateState,
-    busy,
-  ])
+  }, [current?.uid, currentCode, managedAuthReady])
 
   const updateCurrentSubscription = useLockFn(async (automatic = false) => {
     if (!current?.uid) {
@@ -3004,33 +3094,92 @@ const HomePage = () => {
       // 不再强制客户端必须输入提取码,否则一键导入的用户会被卡住无法启动。
       if (currentCode) {
         setStatus('正在检查提取码有效期...')
-        let expired = Boolean(
-          expiresAt && Date.now() > parseExpireTime(expiresAt),
-        )
-
-        if (!expired) {
+        try {
+          const state = await withRequestDeadline(
+            (signal) => updateState(currentCode, signal),
+            5000,
+          )
+          await syncExpiresAt(state.expires_at)
+          let revision = ''
           try {
-            const state = await withRequestDeadline(
-              (signal) => updateState(currentCode, signal),
-              5000,
+            const cached = JSON.parse(
+              localStorage.getItem(CODE_REVISION_STORAGE_KEY) || 'null',
             )
-            await syncExpiresAt(state.expires_at)
-            // Checking validity does not mean its newer subscription was saved.
-          } catch (error) {
-            if (error instanceof AccessCodeStateError && error.serverRejected) {
-              expired = true
-            } else {
-              // 网络错误（如 web 掉线）不阻止开启，仍用本地已有订阅。
-              setStatus('')
+            if (cached?.accessCode === currentCode)
+              revision = cached.revision || ''
+          } catch {
+            /* old cache */
+          }
+          const wasRestricted =
+            restrictionRef.current?.accessCode === currentCode
+          const refreshBeforeStart =
+            !startupRefreshCompletedRef.current ||
+            wasRestricted ||
+            codeExpired ||
+            Boolean(
+              state.subscription_revision &&
+                state.subscription_revision !== revision,
+            ) ||
+            Number(state.update_version || 0) >
+              Number(localStorage.getItem(CODE_UPDATE_VERSION_STORAGE_KEY) || 0)
+          if (
+            onExpiredProfile() ||
+            ((wasRestricted || codeExpired) && !managedAuthRef.current)
+          ) {
+            await recoverFromExpired(Number(state.update_version || 0))
+          } else if (refreshBeforeStart) {
+            const result = await updateManagedProfile(
+              Number(state.update_version || 0),
+              { suppressValidationNotice: true },
+            )
+            if (result === 'unmanaged')
+              await updateCurrentProfileKeepingRules(true)
+            if (result !== 'managed-detached') {
+              localStorage.setItem(
+                CODE_UPDATE_VERSION_STORAGE_KEY,
+                String(state.update_version || 0),
+              )
+              if (state.subscription_revision)
+                localStorage.setItem(
+                  CODE_REVISION_STORAGE_KEY,
+                  JSON.stringify({
+                    accessCode: currentCode,
+                    revision: state.subscription_revision,
+                  }),
+                )
             }
           }
-        }
-
-        // 已到期：仍允许开启开关，但切换到只含一个不可上网节点的占位配置，并弹窗提示续费。
-        // 续费后由轮询自动检测并恢复正式订阅。
-        if (expired) {
-          await activateExpiredProfile().catch(() => {})
-          setExpiredDialogOpen(true)
+          if (refreshBeforeStart) {
+            startupRefreshCompletedRef.current = true
+            try {
+              sessionStorage.setItem(STARTUP_REFRESH_SESSION_KEY, 'done')
+            } catch {
+              /* optional */
+            }
+          }
+          clearAccessRestriction(currentCode)
+        } catch (error) {
+          if (error instanceof AccessCodeStateError && error.serverRejected) {
+            const reason = error.stateCode
+              ? restrictionReason(error.stateCode)
+              : codeExpired
+                ? 'expired'
+                : 'unavailable'
+            recordAccessRestriction(currentCode, reason)
+            setExpiredDialogOpen(reason !== 'unavailable')
+            setStatus(error.message)
+            return
+          }
+          // A remembered restriction cannot be cleared by an offline startup.
+          if (
+            codeExpired ||
+            restrictionRef.current?.accessCode === currentCode ||
+            onExpiredProfile()
+          ) {
+            setStatus('尚未确认提取码恢复，请联网后重试')
+            subscriptionMonitorRef.current?.wake()
+            return
+          }
         }
       }
 
@@ -4445,6 +4594,22 @@ const HomePage = () => {
                     }}
                   >
                     切换提取码
+                  </Button>
+                )}
+                {showRenewal && (
+                  <Button
+                    variant="outlined"
+                    startIcon={<ShoppingCartRounded />}
+                    sx={outlineButtonSx}
+                    onClick={() =>
+                      void openRenewal().catch(() =>
+                        setStatus('续费页面暂未打开，请稍后重试'),
+                      )
+                    }
+                  >
+                    {activeRestriction?.reason === 'traffic_limit'
+                      ? '续费 / 恢复流量'
+                      : '续费'}
                   </Button>
                 )}
                 {importantStatus && (
@@ -6247,23 +6412,23 @@ const HomePage = () => {
             slotProps={{ paper: { sx: glassDialogPaperSx } }}
           >
             <DialogTitle sx={{ fontWeight: 900, pb: 0.5 }}>
-              提取码已到期
+              {activeRestriction?.reason === 'traffic_limit'
+                ? '流量额度已用尽'
+                : '提取码已到期'}
             </DialogTitle>
             <DialogContent sx={{ pt: 1.5 }}>
               <Typography sx={{ fontSize: 13.5, lineHeight: 1.7 }}>
-                当前提取码已到期，已自动切换到「{EXPIRED_NODE_NAME}
-                」占位节点，暂时无法上网。
-                <br />
-                请续费后重新导入提取码即可恢复；续费成功后也会自动检测并恢复正常订阅。
+                {activeRestriction?.reason === 'traffic_limit'
+                  ? '当前流量额度已用尽。'
+                  : '当前提取码已到期。'}
+                网站续费、管理员加时或额度恢复后，客户端会自动检查并更新订阅，无需重新导入。
               </Typography>
             </DialogContent>
             <DialogActions sx={{ px: 3, pb: 2.5 }}>
               <Button
                 variant="contained"
                 onClick={() => {
-                  openWebUrl(
-                    `${getApiBase()}/pay?action=renew&code=${encodeURIComponent(savedCode)}`,
-                  ).catch(() => undefined)
+                  void openRenewal().catch(() => undefined)
                 }}
                 sx={{
                   background: 'linear-gradient(135deg, #5f7bf0, #4159e0)',
@@ -6282,7 +6447,7 @@ const HomePage = () => {
                   setCodeDialogOpen(true)
                 }}
               >
-                重新导入提取码
+                切换提取码
               </Button>
               <Button onClick={() => setExpiredDialogOpen(false)}>关闭</Button>
             </DialogActions>
