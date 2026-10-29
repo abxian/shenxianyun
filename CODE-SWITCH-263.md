@@ -29,3 +29,11 @@ Apple首页改钥匙玻璃按钮复用真实输入sheet、无码启动打开shee
 需从本分支构建并安装新开发包才生效，当前正式2.5.48原件不含此改动；本轮不自动安装/修改用户系统网络。按commit revert本轮源码/测试/CI步后重建即可回退，不改本地账号schema或生产数据。旧源码、正式包与已验证NAS备份保留，不裁剪。
 
 审计 `/Users/cgnay/Desktop/claude/rc/ops/code-switch263-20261030`，实际CI/构建回执与最终Trilium记录后续补齐；可编辑脚本与检索型证据同仓归档，临时原始构建日志只在.build/ops，禁止提交用户数据/签名材料。首次命令误用rc相对目录/pnpm外层版本入口未写产品，改在正确仓执行；gh对fork必须显式 `-R abxian/Clash-Client`，不能默认误选ProjectClash上游。评估362、PC/Apple变更日志code263-plan-20261030先行。
+
+## 最终测试包交付与网络回执
+
+准确源40916071381四平台工件已通过GitHub原始大小/完整SHA核验，Mac DMG只读原生神仙云.app/de.sxnn身份、完整2.5.48+deploytest.1030.12b37af/arm64/deep签名通过；四包放`/Users/cgnay/Desktop/神仙云切码测试版-263-20261030`，附SHA256SUMS与说明，未安装。只有Apple芯片Mac、Windows x64/ARM64和Linux amd64，本轮没有Intel Mac临时包。dev工作流archive:false是原始文件，gh run download误按ZIP会失败；改用认证artifact API的原始响应并核原digest，未解压猜测。
+
+网络故障只读核验默认github.com/api.github.com DNS落在198.18/15且系统HTTP/HTTPS代理关闭。工具github_read_transport.py仅在本次Python socket或git -c http.curloptResolve进程中用正常TLS的Google DoH真实public A，保留原URL/Host/SNI/证书；GitHub API令牌仅内存且重定向清Authorization/Cookie，只有GitHub API实际返回的受限Actions Azure存储跳转可下载。原件全SHA仍必须匹配，没有改用户DNS/代理/VPN。GitHub元数据必须Accept application/vnd.github+json，曾误用octet-stream被415拒绝，修正后通过，不隐藏为一次成功。脚本和参数/依赖/范围/风险/回退见docstring，最终归档在本轮Trilium维护工具下全文下载核SHA。原产品源码先已同步，后置报告推送首次系统PATH缺cargo时正常hook拒绝，补指定Rust1.95 PATH后正常push；未绕hooks。
+
+PC与Apple产品/报告/截图共14项先已从精确提交匿名全文下载SHA核对；本最终报告追加后按最终文档提交再次回读，最终回执以ops/code-switch263-20261030/source-public-readback.json为准。正式NAS/API只读再次确认仍PC2.5.48、Android2.11.51；没有自行发布新正式版。
