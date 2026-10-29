@@ -25,9 +25,12 @@ const callbacks = new Map()
 function visit(n) {
   if (
     ts.isVariableDeclaration(n) &&
-    ['importByCode', 'manualImportFile', 'stopForServerLimit'].includes(
-      n.name.getText(ast),
-    )
+    [
+      'importByCode',
+      'manualImportFile',
+      'stopForServerLimit',
+      'togglePower',
+    ].includes(n.name.getText(ast))
   )
     callbacks.set(n.name.getText(ast), n.initializer.arguments[0].getText(ast))
   ts.forEachChild(n, visit)
@@ -175,4 +178,41 @@ test('live VPN must stop before changing config, keeping telemetry attribution i
 test('late account restriction cannot stop a selected manual configuration', async () => {
   const p = { currentCode: 'old-account', activeCodeRef: { current: '' } }
   await actual('stopForServerLimit', p)('old-account quota exhausted') // any native call is deliberately missing and would fail
+})
+
+test('manual profile starts without checking an expired saved account', async () => {
+  const events = []
+  const p = {
+    manualBusy: false,
+    refreshApplyInFlightRef: { current: false },
+    autoRefreshControllerRef: { current: null },
+    running: false,
+    current: { uid: 'manual-file' },
+    currentCode: '',
+    setBusy: () => {},
+    setStatus: () => {},
+    proxyStateMismatch: false,
+    tunOn: false,
+    systemProxyOn: false,
+    systemProxyConfigOn: false,
+    isTunModeAvailable: false,
+    startCore: async () => {
+      events.push('core')
+    },
+    restartCore: async () => {},
+    waitForCoreReady: async () => true,
+    mutateSystemState: async () => {},
+    localStorage: { getItem: () => null },
+    patchVerge: async () => {},
+    toggleSystemProxy: async (value) => {
+      events.push(['proxy', value])
+    },
+    invalidateProxyState: async () => {},
+    refreshAll: async () => {},
+    sendClientPresence: async () => {},
+    updateState: () =>
+      assert.fail('manual profile cannot check the unrelated saved account'),
+  }
+  await actual('togglePower', p)()
+  assert.deepEqual(events, ['core', ['proxy', true]])
 })
