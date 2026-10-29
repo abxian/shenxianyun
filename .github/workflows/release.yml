@@ -295,6 +295,9 @@ jobs:
           tauriScript: pnpm
           args: --target ${{ matrix.target }}
           includeUpdaterJson: true
+          # Keep historical ASCII DMG links after the native app was renamed.
+          # Updater archives include version+arch; signed bytes are unchanged.
+          assetNamePattern: ${{ contains(matrix.target, 'apple-darwin') && 'Clash.Verge_[version]_[arch][ext]' || '' }}
 
       - name: Attest Windows bundles
         if: matrix.os == 'windows-latest'

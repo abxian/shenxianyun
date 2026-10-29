@@ -120,9 +120,12 @@ jobs:
         if: ${{ !inputs.reuse_release_assets }}
         shell: bash
         run: |
-          DMG=$(find "target/$TARGET/release/bundle/dmg" -name '*.dmg' -type f -print -quit)
-          UPDATER=$(find "target/$TARGET/release/bundle/macos" -name '*.app.tar.gz' -type f -print -quit)
-          SIG="$UPDATER.sig"
+          set -euo pipefail
+          python3 scripts/macos-release-assets.py stage --version "$VERSION" --arch x64 \
+            --bundle-root "target/$TARGET/release/bundle" --out "$RUNNER_TEMP/intel-compatible" > "$RUNNER_TEMP/intel-assets.json"
+          DMG=$(jq -r .DMG "$RUNNER_TEMP/intel-assets.json")
+          UPDATER=$(jq -r .UPDATER "$RUNNER_TEMP/intel-assets.json")
+          SIG=$(jq -r .SIG "$RUNNER_TEMP/intel-assets.json")
           test -n "$DMG" && test -f "$DMG"
           test -n "$UPDATER" && test -f "$UPDATER"
           test -f "$SIG"
@@ -141,13 +144,17 @@ jobs:
           set -euo pipefail
           BUNDLE_DIR="$RUNNER_TEMP/intel-release"
           mkdir -p "$BUNDLE_DIR"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/${{ inputs.tag }}" > "$RUNNER_TEMP/intel-release.json"
+          python3 scripts/macos-release-assets.py select --version "$VERSION" --arch x64 \
+            --metadata "$RUNNER_TEMP/intel-release.json" > "$RUNNER_TEMP/intel-assets.json"
+          DMG_NAME=$(jq -r .DMG "$RUNNER_TEMP/intel-assets.json")
+          UPDATER_NAME=$(jq -r .UPDATER "$RUNNER_TEMP/intel-assets.json")
+          SIG_NAME=$(jq -r .SIG "$RUNNER_TEMP/intel-assets.json")
           gh release download "${{ inputs.tag }}" --dir "$BUNDLE_DIR" --clobber \
-            --pattern "Clash.Verge_${VERSION}_x64.dmg" \
-            --pattern 'Clash.Verge.app.tar.gz' \
-            --pattern 'Clash.Verge.app.tar.gz.sig'
-          DMG="$BUNDLE_DIR/Clash.Verge_${VERSION}_x64.dmg"
-          UPDATER="$BUNDLE_DIR/Clash.Verge.app.tar.gz"
-          SIG="$UPDATER.sig"
+            --pattern "$DMG_NAME" --pattern "$UPDATER_NAME" --pattern "$SIG_NAME"
+          DMG="$BUNDLE_DIR/$DMG_NAME"
+          UPDATER="$BUNDLE_DIR/$UPDATER_NAME"
+          SIG="$BUNDLE_DIR/$SIG_NAME"
           test "$(stat -f %z "$DMG")" -gt 10000000
           test "$(stat -f %z "$UPDATER")" -gt 10000000
           test -s "$SIG"

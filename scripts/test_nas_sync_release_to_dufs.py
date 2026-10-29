@@ -114,6 +114,31 @@ class BuildPlanTests(unittest.TestCase):
             "v1.2.3-Clash.Verge.app.tar.gz",
         )
 
+    def test_versioned_mac_updaters_keep_existing_installer_aliases(self) -> None:
+        assets = dict(self.assets)
+        replacements = {
+            "Clash.Verge_aarch64.app.tar.gz": "Clash.Verge_1.2.3_aarch64.app.tar.gz",
+            "Clash.Verge.app.tar.gz": "Clash.Verge_1.2.3_x64.app.tar.gz",
+        }
+        for old, new in replacements.items():
+            for suffix in ["", ".sig"]:
+                assets.pop(old + suffix)
+                assets[new + suffix] = fake_asset(new + suffix)
+        data = json.loads(json.dumps(self.update_data))
+        for value in data["platforms"].values():
+            for old, new in replacements.items():
+                value["url"] = value["url"].replace(old, new)
+        with tempfile.TemporaryDirectory() as temporary:
+            publish, rewritten, needed = SYNC.build_plan(
+                tag="v1.2.3", release_assets=assets, update_data=data,
+                public_base="https://downloads.example/sxy/", staging=Path(temporary),
+            )
+        mapping = {str(item.relative_target): item.source_asset for item in publish}
+        self.assertEqual(mapping["神仙云.dmg"], "Clash.Verge_1.2.3_aarch64.dmg")
+        self.assertEqual(mapping["神仙云-Intel.dmg"], "Clash.Verge_1.2.3_x64.dmg")
+        self.assertIn("Clash.Verge_1.2.3_x64.app.tar.gz.sig", needed)
+        self.assertTrue(rewritten["platforms"]["darwin-intel"]["url"].endswith("v1.2.3-Clash.Verge_1.2.3_x64.app.tar.gz"))
+
     def test_build_plan_ignores_stale_assets_from_an_older_version(self) -> None:
         stale_names = [
             "Clash.Verge_1.2.2_x64-setup.exe",

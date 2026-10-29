@@ -13,6 +13,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Check release compatibility and version carriers
+        run: |
+          node scripts/check-version-sync.mjs
+          python3 scripts/test-macos-release-assets.py
+          python3 scripts/test_nas_sync_release_to_dufs.py
+
       - name: Check frontend changes
         id: check_frontend
         uses: dorny/paths-filter@v4
