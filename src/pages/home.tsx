@@ -80,6 +80,7 @@ import {
   createProfile,
   enhanceProfiles,
   factoryResetApp,
+  getAppArch,
   getProfiles,
   getServiceDiagnostics,
   getStableDeviceKey,
@@ -160,7 +161,8 @@ import {
 } from '@/services/subscription-monitor'
 import {
   downloadAndInstallWithFallback,
-  SHENXIANYUN_RELEASES_URL,
+  macosDufsDownloadUrl,
+  releaseUrlForVersion,
 } from '@/services/update'
 import { VISIBLE_APP_NAME } from '@/services/visible-brand'
 import {
@@ -895,12 +897,12 @@ const HomePage = () => {
   const isMacOS = getSystem() === 'macos'
   const doUpdate = useLockFn(async () => {
     if (!updateInfo?.available || updating) return
-    // macOS 没有 Apple 开发者签名/公证，就地自动更新不可靠（会被 Gatekeeper 拦）。
-    // 改为打开 Releases 页让用户手动下载安装。
+    // Match Settings: download the NAS DMG for this CPU, then install manually.
     if (isMacOS) {
-      await openWebUrl(`${SHENXIANYUN_RELEASES_URL}/latest`).catch(
-        () => undefined,
-      )
+      const arch = await getAppArch().catch(() => null)
+      const downloadUrl =
+        macosDufsDownloadUrl(arch) ?? releaseUrlForVersion(updateInfo.version)
+      await openWebUrl(downloadUrl).catch(() => undefined)
       return
     }
     setUpdating(true)

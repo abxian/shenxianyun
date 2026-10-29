@@ -61,8 +61,11 @@ test('keeps native and translated user-facing branding private and consistent', 
   assert.match(updaterSource, /brand::native_text/)
   assert.match(traySource, /build_tray_tooltip/)
   assert.match(traySource, /build_tray_version_label/)
-  assert.match(traySource, /load_managed_auth/)
-  assert.match(traySource, /mask_all_profile_names/)
+  // The tray no longer reads or renders any subscription/profile names.
+  assert.doesNotMatch(
+    traySource,
+    /load_managed_auth|profiles_preview|profiles_\{/,
+  )
   assert.match(serviceSource, /brand::native_text/)
   assert.match(initSource, /brand::VISIBLE_APP_NAME/)
   assert.match(i18nSource, /postProcess:\s*\['visibleBrand'\]/)
