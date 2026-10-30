@@ -235,6 +235,12 @@ jobs:
           echo "OPENSSL_LIB_DIR=$(brew --prefix openssl@3)/lib" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "$GITHUB_ENV"
 
+      - name: Install Go for accounting core
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: false
+
       - name: Install Node
         uses: actions/setup-node@v6
         with:
@@ -356,6 +362,12 @@ jobs:
             . -> target
           cache-all-crates: true
           cache-workspace-crates: true
+
+      - name: Install Go for accounting core
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: false
 
       - name: Install Node
         uses: actions/setup-node@v6
@@ -504,6 +516,12 @@ jobs:
           cache-all-crates: true
           cache-workspace-crates: true
 
+      - name: Install Go for accounting core
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: false
+
       - name: Install Node
         uses: actions/setup-node@v6
         with:
@@ -596,6 +614,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Install Go for accounting core
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: false
+
       - name: Install Node
         uses: actions/setup-node@v6
         with:
@@ -624,6 +648,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Install Go for accounting core
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: false
 
       - name: Install Node
         uses: actions/setup-node@v6

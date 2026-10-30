@@ -192,7 +192,10 @@ const ACCESS_RESTRICTION_STORAGE_KEY = 'shenxianyun.accessRestriction.v1'
 const STARTUP_REFRESH_SESSION_KEY = 'shenxianyun.startupSubscriptionRefresh.v1'
 const CLIENT_ID_STORAGE_KEY = 'shenxianyun.clientId'
 const PENDING_PRESENCE_STORAGE_KEY = 'shenxianyun.pendingPresence.v1'
-const MANAGED_TRAFFIC_STORAGE_KEY = 'shenxianyun.managedTraffic.v1'
+const MANAGED_TRAFFIC_STORAGE_KEY =
+  getSystem() === 'windows'
+    ? 'shenxianyun.managedTraffic.proxy.v2'
+    : 'shenxianyun.managedTraffic.v1'
 const MANAGED_TRAFFIC_DIAGNOSTIC_STORAGE_KEY =
   'shenxianyun.managedTrafficStatus.v1'
 // 到期占位配置的本地 UID，续费恢复后用它定位并删除占位配置。
@@ -946,6 +949,7 @@ const HomePage = () => {
   const [delaySortTick, setDelaySortTick] = useState(0)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const trafficTotalsRef = useRef({ upload: 0, download: 0 })
+  const proxyTrafficReadyRef = useRef(false)
   const lastReportedTrafficRef = useRef({ upload: 0, download: 0 })
   const trafficReportRetryAfterRef = useRef(0)
   const trafficCounterRef = useRef<ManagedTrafficCounter | null>(null)
@@ -2034,7 +2038,12 @@ const HomePage = () => {
   const reportClientTraffic = useCallback(
     async (signal: AbortSignal): Promise<ManagedTrafficReportOutcome> => {
       const value = currentCode
-      if (!value || !running) return { status: 'inactive' }
+      if (
+        !value ||
+        !running ||
+        (DESKTOP_PLATFORM === 'windows' && !proxyTrafficReadyRef.current)
+      )
+        return { status: 'inactive' }
 
       const current = trafficTotalsRef.current
       const auth = managedAuthRef.current
@@ -2566,6 +2575,7 @@ const HomePage = () => {
       pendingManagedTrafficRef.current = undefined
       return
     }
+    if (DESKTOP_PLATFORM === 'windows' && !proxyTrafficReadyRef.current) return
     if (trafficCounterRef.current?.accessCode === currentCode) return
 
     const restored = parseManagedTrafficCounter(
@@ -2578,12 +2588,31 @@ const HomePage = () => {
     trafficCounterRef.current = counter
     pendingManagedTrafficRef.current = undefined
     localStorage.setItem(MANAGED_TRAFFIC_STORAGE_KEY, JSON.stringify(counter))
-  }, [currentCode, managedAuthReady])
+  }, [
+    currentCode,
+    managedAuthReady,
+    connectionResponse.data?.proxyUploadTotal,
+    connectionResponse.data?.proxyDownloadTotal,
+  ])
 
   useEffect(() => {
+    const sample = connectionResponse.data
+    const proxyReady =
+      Number.isSafeInteger(sample?.proxyUploadTotal) &&
+      Number.isSafeInteger(sample?.proxyDownloadTotal) &&
+      Number(sample?.proxyUploadTotal) >= 0 &&
+      Number(sample?.proxyDownloadTotal) >= 0
+    proxyTrafficReadyRef.current = proxyReady
+    if (DESKTOP_PLATFORM === 'windows' && !proxyReady) return
     const totals = {
-      upload: connectionResponse.data?.uploadTotal ?? 0,
-      download: connectionResponse.data?.downloadTotal ?? 0,
+      upload:
+        DESKTOP_PLATFORM === 'windows'
+          ? sample.proxyUploadTotal!
+          : (sample?.uploadTotal ?? 0),
+      download:
+        DESKTOP_PLATFORM === 'windows'
+          ? sample.proxyDownloadTotal!
+          : (sample?.downloadTotal ?? 0),
     }
     trafficTotalsRef.current = totals
     const counter = trafficCounterRef.current
@@ -2600,10 +2629,7 @@ const HomePage = () => {
       JSON.stringify(observed.counter),
     )
     if (hasNewTraffic) trafficSchedulerRef.current?.notifyActivity()
-  }, [
-    connectionResponse.data?.downloadTotal,
-    connectionResponse.data?.uploadTotal,
-  ])
+  }, [connectionResponse.data])
 
   useEffect(() => {
     if (!stableRunning || !currentCode || !managedAuthReady) {

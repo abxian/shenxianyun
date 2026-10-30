@@ -43,6 +43,12 @@ jobs:
         with:
           run_install: false
 
+      - name: Install Go for accounting core
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: false
+
       - name: Install Node
         uses: actions/setup-node@v6
         with:
@@ -184,6 +190,12 @@ jobs:
         with:
           run_install: false
 
+      - name: Install Go for accounting core
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: false
+
       - name: Install Node
         uses: actions/setup-node@v6
         with:
@@ -281,6 +293,12 @@ jobs:
         uses: pnpm/action-setup@v6.0.8
         with:
           run_install: false
+
+      - name: Install Go for accounting core
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: false
 
       - name: Install Node
         uses: actions/setup-node@v6
@@ -427,6 +445,12 @@ jobs:
         with:
           run_install: false
 
+      - name: Install Go for accounting core
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: false
+
       - name: Install Node
         uses: actions/setup-node@v6
         with:
@@ -528,6 +552,12 @@ jobs:
         id: fetch_update_logs
         run: bash ./scripts/extract_update_logs.sh
         shell: bash
+
+      - name: Install Go for accounting core
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: false
 
       - name: Install Node
         uses: actions/setup-node@v6

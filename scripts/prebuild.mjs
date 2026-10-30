@@ -1,4 +1,4 @@
-import { execSync } from 'child_process'
+import { execFileSync, execSync } from 'child_process'
 import { createHash } from 'crypto'
 import fs from 'fs'
 import fsp from 'fs/promises'
@@ -369,6 +369,17 @@ async function downloadFile(url, outPath) {
 // =======================
 async function resolveSidecar(binInfo) {
   const { name, targetFile, zipFile, exeFile, downloadURL } = binInfo
+  if (
+    SIDECAR_HOST.includes('windows') &&
+    (name === 'verge-mihomo' || name === 'verge-mihomo-alpha')
+  ) {
+    if (name === 'verge-mihomo') {
+      execFileSync('python', ['scripts/build-proxy-core.py', SIDECAR_HOST], {
+        stdio: 'inherit',
+      })
+    }
+    return
+  }
   const sidecarPath = path.join(SIDECAR_DIR, targetFile)
   await fsp.mkdir(SIDECAR_DIR, { recursive: true })
 
@@ -698,7 +709,7 @@ async function resolveServiceBundle() {
   // 共用一个 SERVICE_DIR。只比版本号的话，先构建 Windows 再构建 macOS 时，
   // Windows 写下的版本戳会替 macOS 那三个旧文件背书，于是旧版本的二进制被原样
   // 留下——正是这次要根除的“陈旧产物悄悄活下来”。
-  let stamp = null
+  let stamp
   try {
     stamp = JSON.parse(await fsp.readFile(SERVICE_STAMP_FILE, 'utf8'))
   } catch {

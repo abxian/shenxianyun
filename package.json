@@ -33,7 +33,7 @@
     "test:code-switch": "node --test scripts/test-code-switch.mjs",
     "test:startup-refresh": "node --experimental-strip-types --test scripts/test-http-request-deadline.mjs scripts/test-subscription-content.mjs scripts/test-home-node-order.mjs",
     "test:managed-subscription": "node --experimental-strip-types --test scripts/test-managed-subscription.mjs",
-    "test:managed-traffic": "node --experimental-strip-types --test scripts/test-http-request-init.mjs scripts/test-managed-traffic-counter.mjs scripts/test-managed-traffic-diagnostics.mjs scripts/test-managed-traffic-scheduler.mjs",
+    "test:managed-traffic": "node --experimental-strip-types --test scripts/test-http-request-init.mjs scripts/test-managed-traffic-counter.mjs scripts/test-proxy-accounting.mjs scripts/test-managed-traffic-diagnostics.mjs scripts/test-managed-traffic-scheduler.mjs",
     "test:presence-throttle": "node --experimental-strip-types --test scripts/test-presence-throttle.mjs",
     "test:update-button-state": "node --experimental-strip-types --test scripts/test-update-button-state.mjs",
     "test:commercial-isolation": "node --test scripts/test-shenxianyun-commercial-isolation.mjs",

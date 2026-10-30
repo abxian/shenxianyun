@@ -1,0 +1,22 @@
+name: Proxy Accounting Core
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  accounting:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false
+      - name: Patch pinned core and test counters
+        run: python3 scripts/build-proxy-core.py x86_64-pc-windows-msvc --test-only
+      - name: Build isolated native fixture core
+        run: |
+          work=$(find node_modules/.verge/proxy-core -mindepth 1 -maxdepth 1 -type d | head -1)
+          cd "$work"
+          go build -tags with_gvisor -o "$RUNNER_TEMP/accounting-core" .
+      - name: Real direct and short proxy transfers
+        run: python3 scripts/mihomo/live-accounting.py "$RUNNER_TEMP/accounting-core"
