@@ -28,11 +28,11 @@ jobs:
 
       - name: Verify exact proxy accounting core and real loopback traffic
         run: |
-          python3 scripts/build-proxy-core.py x86_64-pc-windows-msvc --test-only
-          work=$(find node_modules/.verge/proxy-core -mindepth 1 -maxdepth 1 -type d | head -1)
-          (cd "$work" && go build -tags with_gvisor -o "$RUNNER_TEMP/accounting-core" .)
-          python3 scripts/mihomo/live-accounting.py "$RUNNER_TEMP/accounting-core"
-          python3 scripts/test-rule-editor-live.py "$RUNNER_TEMP/accounting-core" "$RUNNER_TEMP/rules-edited.yaml" "$RUNNER_TEMP/rules-deleted.yaml"
+          python3 scripts/test-core-targets.py
+          python3 scripts/build-proxy-core.py x86_64-unknown-linux-gnu
+          core="$PWD/src-tauri/sidecar/verge-mihomo-x86_64-unknown-linux-gnu"
+          python3 scripts/mihomo/live-accounting.py "$core"
+          python3 scripts/test-rule-editor-live.py "$core" "$RUNNER_TEMP/rules-edited.yaml" "$RUNNER_TEMP/rules-deleted.yaml"
 
       - name: Check release compatibility and version carriers
         run: |
@@ -137,3 +137,36 @@ jobs:
       - name: Run commercial isolation tests
         if: steps.check_frontend.outputs.frontend == 'true'
         run: pnpm test:commercial-isolation
+
+  accounting-native:
+    name: Proxy accounting on ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            extension: .exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            extension: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false
+      - name: Build and verify the actual native accounting core
+        shell: bash
+        run: |
+          python scripts/test-core-targets.py
+          python scripts/build-proxy-core.py '${{ matrix.target }}'
+          python scripts/mihomo/live-accounting.py 'src-tauri/sidecar/verge-mihomo-${{ matrix.target }}${{ matrix.extension }}'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: accounting-native-${{ matrix.target }}
+          path: src-tauri/sidecar/proxy-accounting-${{ matrix.target }}.json

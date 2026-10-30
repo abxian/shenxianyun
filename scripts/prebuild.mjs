@@ -369,14 +369,15 @@ async function downloadFile(url, outPath) {
 // =======================
 async function resolveSidecar(binInfo) {
   const { name, targetFile, zipFile, exeFile, downloadURL } = binInfo
-  if (
-    SIDECAR_HOST.includes('windows') &&
-    (name === 'verge-mihomo' || name === 'verge-mihomo-alpha')
-  ) {
+  if (name === 'verge-mihomo' || name === 'verge-mihomo-alpha') {
     if (name === 'verge-mihomo') {
-      execFileSync('python', ['scripts/build-proxy-core.py', SIDECAR_HOST], {
-        stdio: 'inherit',
-      })
+      execFileSync(
+        platform === 'win32' ? 'python' : 'python3',
+        ['scripts/build-proxy-core.py', SIDECAR_HOST],
+        {
+          stdio: 'inherit',
+        },
+      )
     }
     return
   }

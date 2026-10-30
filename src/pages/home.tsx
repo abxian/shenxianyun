@@ -105,6 +105,10 @@ import {
 } from '@/services/cmds'
 import delayManager from '@/services/delay'
 import {
+  desktopProxyTrafficTotals,
+  DESKTOP_MANAGED_TRAFFIC_STORAGE_KEY,
+} from '@/services/desktop-proxy-traffic'
+import {
   fetchWithVerifiedTls,
   getApiBase,
   getBootstrapProxy,
@@ -202,10 +206,7 @@ const ACCESS_RESTRICTION_STORAGE_KEY = 'shenxianyun.accessRestriction.v1'
 const STARTUP_REFRESH_SESSION_KEY = 'shenxianyun.startupSubscriptionRefresh.v1'
 const CLIENT_ID_STORAGE_KEY = 'shenxianyun.clientId'
 const PENDING_PRESENCE_STORAGE_KEY = 'shenxianyun.pendingPresence.v1'
-const MANAGED_TRAFFIC_STORAGE_KEY =
-  getSystem() === 'windows'
-    ? 'shenxianyun.managedTraffic.proxy.v2'
-    : 'shenxianyun.managedTraffic.v1'
+const MANAGED_TRAFFIC_STORAGE_KEY = DESKTOP_MANAGED_TRAFFIC_STORAGE_KEY
 const MANAGED_TRAFFIC_DIAGNOSTIC_STORAGE_KEY =
   'shenxianyun.managedTrafficStatus.v1'
 // 到期占位配置的本地 UID，续费恢复后用它定位并删除占位配置。
@@ -329,8 +330,15 @@ const buildExpiredProfileYaml = () =>
     rules: [...officialDirectRules(), 'MATCH,节点选择'],
   })
 const DESKTOP_VERSION = desktopBuildVersion
-const CLIENT_UA = `JC116-Shenxianyun-Windows/${DESKTOP_VERSION}`
 const DESKTOP_PLATFORM = getSystem()
+const CLIENT_PLATFORM_LABEL = {
+  windows: 'Windows电脑',
+  macos: 'Mac电脑',
+  linux: 'Linux电脑',
+  unknown: '桌面电脑',
+}[DESKTOP_PLATFORM]
+const CLIENT_TYPE = `shenxianyun-${DESKTOP_PLATFORM}`
+const CLIENT_UA = `JC116-Shenxianyun-${{ windows: 'Windows', macos: 'macOS', linux: 'Linux', unknown: 'Desktop' }[DESKTOP_PLATFORM]}/${DESKTOP_VERSION}`
 const LIGHT_SURFACE_TEXT_COLOR = '#182033'
 const fieldSx = {
   '& .MuiInputLabel-root': {
@@ -1280,7 +1288,7 @@ const HomePage = () => {
           'Content-Type': 'application/json',
           'User-Agent': CLIENT_UA,
           'X-Client-Id': getClientId(),
-          'X-Client-Type': 'shenxianyun-windows',
+          'X-Client-Type': CLIENT_TYPE,
         },
         body: JSON.stringify({ code: input, target: 'shenxianyun' }),
       })
@@ -1309,7 +1317,7 @@ const HomePage = () => {
             'Content-Type': 'application/json',
             'User-Agent': CLIENT_UA,
             'X-Client-Id': getClientId(),
-            'X-Client-Type': 'shenxianyun-windows',
+            'X-Client-Type': CLIENT_TYPE,
           },
           body: JSON.stringify({
             ticket: request.ticket,
@@ -1355,7 +1363,7 @@ const HomePage = () => {
           Authorization: `Bearer ${auth.deviceToken}`,
           'User-Agent': CLIENT_UA,
           'X-Client-Id': getClientId(),
-          'X-Client-Type': 'shenxianyun-windows',
+          'X-Client-Type': CLIENT_TYPE,
         },
       })
       if (!response.ok) {
@@ -1615,7 +1623,7 @@ const HomePage = () => {
           headers: {
             'User-Agent': CLIENT_UA,
             'X-Client-Id': getClientId(),
-            'X-Client-Type': 'shenxianyun-windows',
+            'X-Client-Type': CLIENT_TYPE,
           },
         },
       )
@@ -1645,7 +1653,7 @@ const HomePage = () => {
           headers: {
             'User-Agent': CLIENT_UA,
             'X-Client-Id': getClientId(),
-            'X-Client-Type': 'shenxianyun-windows',
+            'X-Client-Type': CLIENT_TYPE,
           },
         },
       )
@@ -1679,7 +1687,7 @@ const HomePage = () => {
         headers: {
           'User-Agent': CLIENT_UA,
           'X-Client-Id': getClientId(),
-          'X-Client-Type': 'shenxianyun-windows',
+          'X-Client-Type': CLIENT_TYPE,
         },
       },
     )
@@ -1976,10 +1984,10 @@ const HomePage = () => {
               'Content-Type': 'application/json',
               'User-Agent': CLIENT_UA,
               'X-Client-Id': getClientId(),
-              'X-Client-Type': 'shenxianyun-windows',
+              'X-Client-Type': CLIENT_TYPE,
             },
             body: JSON.stringify({
-              platform: 'Windows电脑',
+              platform: CLIENT_PLATFORM_LABEL,
               app_name: '神仙云桌面端',
               app_version: DESKTOP_VERSION,
               device_name: navigator.userAgent,
@@ -2073,7 +2081,7 @@ const HomePage = () => {
       const endpoint = online ? 'heartbeat' : 'offline'
       const params = new URLSearchParams({
         client_id: getClientId(),
-        platform: 'Windows电脑',
+        platform: CLIENT_PLATFORM_LABEL,
         app_name: '神仙云桌面端',
         app_version: DESKTOP_VERSION,
         device_name: navigator.userAgent,
@@ -2086,7 +2094,7 @@ const HomePage = () => {
           headers: {
             'User-Agent': CLIENT_UA,
             'X-Client-Id': getClientId(),
-            'X-Client-Type': 'shenxianyun-windows',
+            'X-Client-Type': CLIENT_TYPE,
           },
         },
       )
@@ -2124,11 +2132,7 @@ const HomePage = () => {
   const reportClientTraffic = useCallback(
     async (signal: AbortSignal): Promise<ManagedTrafficReportOutcome> => {
       const value = currentCode
-      if (
-        !value ||
-        !running ||
-        (DESKTOP_PLATFORM === 'windows' && !proxyTrafficReadyRef.current)
-      )
+      if (!value || !running || !proxyTrafficReadyRef.current)
         return { status: 'inactive' }
 
       const current = trafficTotalsRef.current
@@ -2167,11 +2171,11 @@ const HomePage = () => {
               'Content-Type': 'application/json',
               'User-Agent': CLIENT_UA,
               'X-Client-Id': getClientId(),
-              'X-Client-Type': 'shenxianyun-windows',
+              'X-Client-Type': CLIENT_TYPE,
             },
             body: JSON.stringify({
               ...pending,
-              platform: 'Windows电脑',
+              platform: CLIENT_PLATFORM_LABEL,
               app_name: '神仙云桌面端',
               app_version: DESKTOP_VERSION,
               device_name: navigator.userAgent,
@@ -2286,11 +2290,11 @@ const HomePage = () => {
             'Content-Type': 'application/json',
             'User-Agent': CLIENT_UA,
             'X-Client-Id': getClientId(),
-            'X-Client-Type': 'shenxianyun-windows',
+            'X-Client-Type': CLIENT_TYPE,
           },
           body: JSON.stringify({
             client_id: getClientId(),
-            platform: 'Windows电脑',
+            platform: CLIENT_PLATFORM_LABEL,
             app_name: '神仙云桌面端',
             app_version: DESKTOP_VERSION,
             device_name: navigator.userAgent,
@@ -2661,7 +2665,7 @@ const HomePage = () => {
       pendingManagedTrafficRef.current = undefined
       return
     }
-    if (DESKTOP_PLATFORM === 'windows' && !proxyTrafficReadyRef.current) return
+    if (!proxyTrafficReadyRef.current) return
     if (trafficCounterRef.current?.accessCode === currentCode) return
 
     const restored = parseManagedTrafficCounter(
@@ -2682,24 +2686,9 @@ const HomePage = () => {
   ])
 
   useEffect(() => {
-    const sample = connectionResponse.data
-    const proxyReady =
-      Number.isSafeInteger(sample?.proxyUploadTotal) &&
-      Number.isSafeInteger(sample?.proxyDownloadTotal) &&
-      Number(sample?.proxyUploadTotal) >= 0 &&
-      Number(sample?.proxyDownloadTotal) >= 0
-    proxyTrafficReadyRef.current = proxyReady
-    if (DESKTOP_PLATFORM === 'windows' && !proxyReady) return
-    const totals = {
-      upload:
-        DESKTOP_PLATFORM === 'windows'
-          ? sample.proxyUploadTotal!
-          : (sample?.uploadTotal ?? 0),
-      download:
-        DESKTOP_PLATFORM === 'windows'
-          ? sample.proxyDownloadTotal!
-          : (sample?.downloadTotal ?? 0),
-    }
+    const totals = desktopProxyTrafficTotals(connectionResponse.data)
+    proxyTrafficReadyRef.current = totals !== null
+    if (!totals) return
     trafficTotalsRef.current = totals
     const counter = trafficCounterRef.current
     if (!counter) return
