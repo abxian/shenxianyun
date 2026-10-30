@@ -49,7 +49,7 @@ mod tests {
     use super::*;
 
     fn mapping(yaml: &str) -> Mapping {
-        serde_yaml_ng::from_str(yaml).unwrap()
+        serde_yaml_ng::from_str(yaml).expect("valid rule editor fixture")
     }
 
     #[test]
@@ -59,7 +59,7 @@ mod tests {
         );
         let mut config =
             mapping("rules: ['DOMAIN-SUFFIX,de,DIRECT', 'MATCH,Test']\nprepend-rules: []\nappend-rules: []\n");
-        apply(&mut config, &edits).unwrap();
+        apply(&mut config, &edits).expect("valid rule editor fixture");
         assert_eq!(
             config["rules"],
             mapping(
@@ -75,21 +75,21 @@ mod tests {
         let edits = mapping("prepend-rules: ['DOMAIN,example.com,Test', 'DOMAIN,example.com,Test']");
         let mut config =
             mapping("mode: rule\nrules: ['DOMAIN, api.sxnn.de, DIRECT', 'DOMAIN,example.com,Test', 'MATCH,Test']");
-        apply(&mut config, &edits).unwrap();
-        let saved = serde_yaml_ng::to_string(&config).unwrap();
-        apply(&mut config, &edits).unwrap();
-        assert_eq!(saved, serde_yaml_ng::to_string(&config).unwrap());
+        apply(&mut config, &edits).expect("valid rule editor fixture");
+        let saved = serde_yaml_ng::to_string(&config).expect("valid rule editor fixture");
+        apply(&mut config, &edits).expect("valid rule editor fixture");
+        assert_eq!(saved, serde_yaml_ng::to_string(&config).expect("valid rule editor fixture"));
         assert_eq!(config["mode"], Value::String("rule".into()));
         let mut refreshed = mapping("rules: ['DOMAIN,updated.example,DIRECT', 'MATCH,Test']");
-        apply(&mut refreshed, &edits).unwrap();
-        assert_eq!(refreshed["rules"].as_sequence().unwrap().len(), 4);
+        apply(&mut refreshed, &edits).expect("valid rule editor fixture");
+        assert_eq!(refreshed["rules"].as_sequence().expect("valid rule editor fixture").len(), 4);
     }
 
     #[test]
     fn deletion_restores_subscription_order_and_invalid_edits_fail() {
         let mut config = mapping("rules: ['DOMAIN,example.com,Test', 'MATCH,Test']");
-        apply(&mut config, &Mapping::new()).unwrap();
-        assert_eq!(config["rules"].as_sequence().unwrap().len(), 3);
+        apply(&mut config, &Mapping::new()).expect("valid rule editor fixture");
+        assert_eq!(config["rules"].as_sequence().expect("valid rule editor fixture").len(), 3);
         assert!(apply(&mut config, &mapping("prepend-rules: invalid")).is_err());
         assert!(apply(&mut config, &mapping("prepend-rules: [123]")).is_err());
     }
