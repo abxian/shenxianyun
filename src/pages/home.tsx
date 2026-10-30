@@ -2770,6 +2770,8 @@ const HomePage = () => {
         )
           throw new Error('提取码身份已变化，已取消旧订阅检查')
       }
+      const startupRefresh = !startupRefreshCompletedRef.current
+      if (startupRefresh) setStatus('正在更新订阅，获取最新节点...')
       try {
         const state = await updateState(currentCode, signal)
         assertAccountCurrent()
@@ -2825,6 +2827,7 @@ const HomePage = () => {
             result = await updateManagedProfile(remoteVersion, {
               signal,
               background: true,
+              force: startupRefresh,
               suppressValidationNotice: true,
             })
           if (result === 'unmanaged') {
@@ -2894,8 +2897,11 @@ const HomePage = () => {
           setStatus(error.message)
           return
         }
-        if (restrictionRef.current?.accessCode === currentCode)
-          setStatus('恢复订阅暂未完成，将自动重试')
+        if (
+          startupRefresh ||
+          restrictionRef.current?.accessCode === currentCode
+        )
+          setStatus('暂未更新，已保留原节点，将自动重试')
         if (!(error instanceof AccessCodeStateError))
           void rotateApiBase(proxyUrlRef.current || undefined).catch(
             () => undefined,
@@ -2946,7 +2952,11 @@ const HomePage = () => {
         document.visibilityState === 'hidden' ? 60_000 : 30_000,
     })
     subscriptionMonitorRef.current = monitor
-    const wake = () => monitor.wake()
+    const wake = () => {
+      // Opening or returning to the app fetches the current code's nodes again.
+      startupRefreshCompletedRef.current = false
+      monitor.wake()
+    }
     const visible = () => {
       if (document.visibilityState === 'visible') wake()
     }
@@ -2982,6 +2992,8 @@ const HomePage = () => {
       return
     }
     updateInFlightRef.current = true
+    setBusy(true)
+    setStatus('正在更新订阅，获取最新节点...')
     try {
       let remoteVersion = Number(
         localStorage.getItem(CODE_UPDATE_VERSION_STORAGE_KEY) || 0,
@@ -3011,9 +3023,7 @@ const HomePage = () => {
       )
     } catch (error) {
       console.warn('手动订阅更新失败，已继续使用原订阅', error)
-      setStatus(
-        `订阅更新失败，已保留原配置：${error instanceof Error ? error.message : String(error)}`,
-      )
+      setStatus('暂未更新，已保留原节点，请稍后重试')
     } finally {
       updateInFlightRef.current = false
       setBusy(false)
@@ -3849,6 +3859,7 @@ const HomePage = () => {
           )
         }
         setCodeImportPhase('error')
+        setStatus('暂未导入，请检查提取码或网络后重试')
         setCodeImportMessage(
           recoveryFailure
             ? `安全导入失败，且自动恢复未完成：${recoveryFailure}`
@@ -3965,6 +3976,7 @@ const HomePage = () => {
       if (startAfterImport)
         setStatus('启动失败，已保留原订阅，请检查提取码或网络后重试')
       updatePhase('error')
+      setStatus('暂未导入，请检查提取码或网络后重试')
       setCodeImportMessage(
         recoveryFailure
           ? `新订阅未启用，且自动恢复未完成：${recoveryFailure}`
@@ -6365,7 +6377,7 @@ const HomePage = () => {
             </DialogActions>
           </Dialog>
           <Dialog
-            open={codeDialogOpen}
+            open={codeDialogOpen && codeImportPhase !== 'error'}
             onClose={() => {
               if (busy) return
               setCode('')

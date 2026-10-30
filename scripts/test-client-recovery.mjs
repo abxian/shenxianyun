@@ -212,3 +212,82 @@ test('actual Windows Home update remains in-app and settles cancellation without
     states.some(([name, value]) => name === 'status' && value.includes('取消')),
   )
 })
+
+test('technical error notices never enqueue a popup or timer', async () => {
+  const source = await readFile(
+    new URL('../src/services/notice-service.ts', import.meta.url),
+    'utf8',
+  )
+  const callback = arrow(source, 'baseShowNotice', {
+    nextId: 0,
+    parseNoticeExtras: () =>
+      assert.fail('error notices must not create UI data'),
+    setTimeout: () => assert.fail('hidden errors must not create timers'),
+    notifySubscribers: () =>
+      assert.fail('hidden errors must not notify the UI'),
+  })
+  assert.equal(callback('error', 'invalid REALITY short ID'), 0)
+  assert.equal(callback('error', new Error('core could not stop')), 1)
+})
+
+test('actual startup refresh fetches same-revision nodes and only consumes success', async () => {
+  const source = await readFile(
+    new URL('../src/pages/home.tsx', import.meta.url),
+    'utf8',
+  )
+  for (const fail of [false, true]) {
+    const status = []
+    const updates = []
+    const ports = {
+      currentCode: 'same-code',
+      current: { uid: 'profile' },
+      updateInFlightRef: { current: false },
+      managedAuthRef: { current: { deviceToken: 'token' } },
+      activeCodeRef: { current: 'same-code' },
+      startupRefreshCompletedRef: { current: false },
+      restrictionRef: { current: null },
+      autoRefreshControllerRef: { current: null },
+      refreshApplyInFlightRef: { current: false },
+      localStorage: { getItem: () => 'same-code', setItem: () => {} },
+      sessionStorage: { setItem: () => {} },
+      CODE_STORAGE_KEY: 'code',
+      CODE_UPDATE_VERSION_STORAGE_KEY: 'version',
+      CODE_REVISION_STORAGE_KEY: 'revision',
+      STARTUP_REFRESH_SESSION_KEY: 'session',
+      expiresAt: '',
+      onExpiredProfile: () => false,
+      setStatus: (value) => status.push(value),
+      setBusy: () => {},
+      updateState: async () => ({
+        update_version: 1,
+        subscription_revision: 'unchanged',
+      }),
+      assertRequestActive: () => {},
+      needsSubscriptionRefresh: ({ startup }) => startup,
+      updateManagedProfile: async (_version, options) => {
+        updates.push(options)
+        if (fail) throw new Error('invalid YAML')
+        return 'managed-updated'
+      },
+      mutateProfiles: async () => {},
+      refreshAll: async () => {},
+      clearAccessRestriction: () => {},
+      setExpiredDialogOpen: () => {},
+      AccessCodeStateError: class extends Error {},
+      rotateApiBase: async () => {},
+      proxyUrlRef: { current: '' },
+    }
+    await arrow(
+      source,
+      'checkSubscriptionRecovery',
+      ports,
+    )(new AbortController().signal).catch(() => {})
+    assert.equal(updates.length, 1)
+    assert.equal(updates[0].force, true)
+    assert.equal(updates[0].suppressValidationNotice, true)
+    assert.equal(ports.startupRefreshCompletedRef.current, !fail)
+    assert.ok(status[0].includes('正在更新订阅'))
+    assert.ok(status.at(-1).includes(fail ? '已保留原节点' : '最新'))
+    assert.equal(ports.updateInFlightRef.current, false)
+  }
+})
