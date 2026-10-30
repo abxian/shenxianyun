@@ -32,6 +32,7 @@ export type UpdateFallbackProgress = {
     | 'verified'
     | 'fallback'
     | 'installing'
+    | 'stopping'
   chunkLength?: number | null
   contentLength?: number | null
 }
@@ -201,6 +202,9 @@ export const macosDufsDownloadUrl = (arch?: string | null) => {
   }
   return null
 }
+
+export const cancelAppUpdateDownload = () =>
+  invoke<'cancelled' | 'installing' | 'idle'>('cancel_app_update_download')
 
 export const downloadAndInstallWithFallback = async (
   update: Update,

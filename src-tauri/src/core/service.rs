@@ -417,8 +417,9 @@ pub(super) async fn get_clash_logs_by_service() -> Result<Vec<CompactString>> {
 pub(super) async fn stop_core_by_service() -> Result<()> {
     logging!(info, Type::Service, "通过服务停止核心 (IPC)");
 
-    let response = clash_verge_service_ipc::stop_clash()
+    let response = tokio::time::timeout(Duration::from_secs(8), clash_verge_service_ipc::stop_clash())
         .await
+        .context("停止核心服务超时，请稍后重试；原配置未更改")?
         .context("无法连接到客户端核心服务")?;
 
     if response.code > 0 {

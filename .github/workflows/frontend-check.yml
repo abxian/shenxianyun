@@ -20,6 +20,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Verify native update and core-stop recovery
+        run: python3 scripts/test-client-recovery-core.py
+
       - name: Verify production rule enhancement
         run: python3 scripts/test-rule-editor-core.py "$RUNNER_TEMP/rules-edited.yaml" "$RUNNER_TEMP/rules-deleted.yaml"
 
@@ -112,6 +115,9 @@ jobs:
 
       - name: Code switch disconnect transaction tests
         run: pnpm test:code-switch
+
+      - name: Update cancellation and managed subscription recovery
+        run: node --experimental-strip-types --test scripts/test-client-recovery.mjs
 
       - name: Rule editor persistence and failure tests
         run: node --experimental-strip-types --test scripts/test-traffic-rule-editor.mjs

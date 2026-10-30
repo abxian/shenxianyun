@@ -81,6 +81,7 @@ import {
   enhanceProfiles,
   factoryResetApp,
   getAppArch,
+  getRunningMode,
   getProfiles,
   getServiceDiagnostics,
   getStableDeviceKey,
@@ -119,6 +120,7 @@ import {
   fetchBufferedWithDeadline,
   withRequestDeadline,
 } from '@/services/http-request-deadline'
+import { loadManagedContent } from '@/services/managed-download-recovery'
 import {
   clearManagedAuth,
   extractTicketFromLaunchUrl,
@@ -169,6 +171,7 @@ import {
 } from '@/services/traffic-rule-editor'
 import {
   downloadAndInstallWithFallback,
+  cancelAppUpdateDownload,
   macosDufsDownloadUrl,
   releaseUrlForVersion,
 } from '@/services/update'
@@ -579,6 +582,7 @@ class AccessCodeStateError extends Error {
     message: string,
     readonly serverRejected = false,
     readonly stateCode?: string,
+    readonly httpStatus?: number,
   ) {
     super(message)
   }
@@ -906,6 +910,7 @@ const HomePage = () => {
   }, [busy, manualBusy])
   const [modeOverride, setModeOverride] = useState('')
   const [updating, setUpdating] = useState(false)
+  const [updateInstalling, setUpdateInstalling] = useState(false)
   const [updPercent, setUpdPercent] = useState(0)
   const { updateInfo } = useUpdate(true)
   const isMacOS = getSystem() === 'macos'
@@ -919,14 +924,28 @@ const HomePage = () => {
       await openWebUrl(downloadUrl).catch(() => undefined)
       return
     }
+    if (busy || manualBusy || refreshApplyInFlightRef.current) {
+      setStatus('正在完成配置操作，请稍后更新软件')
+      return
+    }
+    autoRefreshControllerRef.current?.abort()
+    backgroundBusyRef.current = true
+    setBusy(true)
     setUpdating(true)
+    setUpdateInstalling(false)
     setUpdPercent(0)
     setStatus('正在下载更新...')
     let total = 0
     let downloaded = 0
     try {
       await downloadAndInstallWithFallback(updateInfo, (event) => {
-        if (event.phase === 'fallback') {
+        if (event.phase === 'checking') {
+          setStatus(
+            event.source === 'dufs'
+              ? '正在检查更新源...'
+              : '正在检查备用更新源...',
+          )
+        } else if (event.phase === 'fallback') {
           total = 0
           downloaded = 0
           setUpdPercent(0)
@@ -934,22 +953,38 @@ const HomePage = () => {
         } else if (event.phase === 'progress') {
           total = event.contentLength ?? total
           downloaded += event.chunkLength ?? 0
+          setStatus(
+            `正在下载更新，已接收 ${Math.round(downloaded / 1024)} KB...`,
+          )
           if (total > 0) {
             setUpdPercent(Math.min(99, Math.round((downloaded / total) * 100)))
           }
         } else if (event.phase === 'verified') {
           setUpdPercent(100)
+        } else if (event.phase === 'stopping') {
+          setUpdateInstalling(true)
+          setStatus('更新包校验通过，正在停止连接以安装...')
         } else if (event.phase === 'installing') {
+          setUpdateInstalling(true)
           setStatus('更新包校验通过，正在安装...')
         }
       })
       setStatus('更新完成，正在重启...')
       await relaunch()
-    } catch {
-      setStatus('Dufs 与 GitHub 更新源均不可用，请稍后重试')
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error))
     } finally {
       setUpdating(false)
+      setBusy(false)
+      void refreshAll().catch(() => undefined)
     }
+  })
+  const cancelUpdateDownload = useLockFn(async () => {
+    const state = await cancelAppUpdateDownload()
+    if (state === 'cancelled') setStatus('正在取消更新下载...')
+    else if (state === 'installing')
+      setStatus('正在准备安装，暂不能取消，请等待安装器启动')
+    else setStatus('更新任务已结束，可重新尝试')
   })
   const [delayTesting, setDelayTesting] = useState(false)
   const [delaySortTick, setDelaySortTick] = useState(0)
@@ -976,7 +1011,7 @@ const HomePage = () => {
   const presenceThrottleRef = useRef(createPresenceThrottleState())
   // 服务端升级建议本次启动是否已提示过。
   const upgradeHintShownRef = useRef(false)
-  // eslint-disable-next-line @eslint-react/no-unused-state -- readiness is consumed by the subscription lifecycle effect, not JSX.
+
   const [managedAuthReady, setManagedAuthReady] = useState(false)
   const startupRefreshCompletedRef = useRef(false)
   const previousRunningRef = useRef(false)
@@ -1328,6 +1363,8 @@ const HomePage = () => {
         throw new AccessCodeStateError(
           message || '受管订阅获取失败，请重新导入提取码',
           response.status === 401 || response.status === 403,
+          undefined,
+          response.status,
         )
       }
       const content = await response.text()
@@ -1711,12 +1748,13 @@ const HomePage = () => {
         signal?: AbortSignal
         background?: boolean
         allowInactive?: boolean
+        renewCredentials?: boolean
       },
     ): Promise<ManagedProfileUpdateResult> => {
       const force = options?.force ?? false
       const suppressValidationNotice =
         options?.suppressValidationNotice ?? false
-      const auth = managedAuthRef.current
+      let auth = managedAuthRef.current
       if (
         !auth ||
         (auth.profileUid !== current?.uid &&
@@ -1752,8 +1790,9 @@ const HomePage = () => {
         return 'managed-detached'
       }
 
+      const profileUid = auth.profileUid
       const localContent = await withRequestDeadline(
-        () => readProfileFile(auth.profileUid),
+        () => readProfileFile(profileUid),
         5000,
         options?.signal,
       )
@@ -1769,7 +1808,45 @@ const HomePage = () => {
         return 'managed-detached'
       }
 
-      const downloaded = await fetchManagedSubscription(auth, options?.signal)
+      const loaded = await loadManagedContent(
+        auth,
+        options?.renewCredentials ?? false,
+        {
+          download: (value) => fetchManagedSubscription(value, options?.signal),
+          status: (error) =>
+            error instanceof AccessCodeStateError
+              ? error.httpStatus
+              : undefined,
+          current: () => managedAuthRef.current,
+          persist: persistManagedAuth,
+          renew: async (previous) => {
+            // Validate the same code's current target before a user-requested rebind.
+            await updateState(previous.accessCode, options?.signal)
+            assertRequestActive(options?.signal)
+            const apiBase = getApiBase()
+            const ticket = await requestImportTicket(
+              previous.accessCode,
+              apiBase,
+            )
+            const exchange = await exchangeImportTicket({
+              ticket,
+              apiBase,
+              name: previous.accessCode,
+            })
+            assertRequestActive(options?.signal)
+            return {
+              ...previous,
+              apiBase,
+              deviceToken: exchange.device_token,
+              subscriptionUrl: exchange.subscription_url,
+              expiresAt: exchange.expires_at ?? previous.expiresAt,
+              limitMode: exchange.limit_mode || previous.limitMode,
+            }
+          },
+        },
+      )
+      auth = loaded.auth
+      const downloaded = loaded.content
       assertRequestActive(options?.signal)
       if (managedAuthRef.current !== auth)
         throw new Error('提取码已变化，已取消旧订阅更新')
@@ -1843,6 +1920,9 @@ const HomePage = () => {
       codeProfileUid,
       expiredProfileUid,
       fetchManagedSubscription,
+      updateState,
+      requestImportTicket,
+      exchangeImportTicket,
       persistManagedAuth,
       setStatus,
     ],
@@ -2885,6 +2965,10 @@ const HomePage = () => {
   }, [current?.uid, currentCode, managedAuthReady])
 
   const updateCurrentSubscription = useLockFn(async (automatic = false) => {
+    if (!managedAuthReady) {
+      setStatus('正在读取本机订阅，请稍后再更新')
+      return
+    }
     if (automatic && codeEntryActiveRef.current) return
     if (!current?.uid) {
       setStatus('还没有可更新的订阅')
@@ -2899,15 +2983,22 @@ const HomePage = () => {
     }
     updateInFlightRef.current = true
     try {
-      const remoteVersion = Number(
+      let remoteVersion = Number(
         localStorage.getItem(CODE_UPDATE_VERSION_STORAGE_KEY) || 0,
       )
-      const result = await updateManagedProfile(remoteVersion, {
+      const state = currentCode ? await updateState(currentCode) : null
+      if (state) {
+        remoteVersion = Number(state.update_version || 0)
+        await syncExpiresAt(state.expires_at)
+      }
+      let result = await updateManagedProfile(remoteVersion, {
         force: !automatic,
+        renewCredentials: !automatic,
         suppressValidationNotice: true,
       })
       if (result === 'unmanaged') {
-        await updateCurrentProfileKeepingRules(true)
+        if (currentCode) result = await recoverFromExpired(remoteVersion)
+        else await updateCurrentProfileKeepingRules(true)
       }
       void mutateProfiles().catch(() => undefined)
       void refreshAll().catch(() => undefined)
@@ -2920,7 +3011,9 @@ const HomePage = () => {
       )
     } catch (error) {
       console.warn('手动订阅更新失败，已继续使用原订阅', error)
-      setStatus('订阅更新失败，已继续使用原订阅')
+      setStatus(
+        `订阅更新失败，已保留原配置：${error instanceof Error ? error.message : String(error)}`,
+      )
     } finally {
       updateInFlightRef.current = false
       setBusy(false)
@@ -3237,16 +3330,11 @@ const HomePage = () => {
   }, [])
 
   const waitForCoreStopped = useCallback(async () => {
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      try {
-        const version = await withRequestDeadline(() => getVersion(), 1500)
-        if (!version?.version) return true
-      } catch {
-        return true
-      }
-      await new Promise((resolve) => setTimeout(resolve, 150 + attempt * 75))
-    }
-    return false
+    // stopCore now waits for this App's owned sidecar termination or service ack.
+    // A /version response is not an ownership/lifecycle confirmation.
+    return withRequestDeadline(() => getRunningMode(), 3000)
+      .then((mode) => mode === 'NotRunning')
+      .catch(() => false)
   }, [])
 
   const openCodeImport = useLockFn(async () => {
@@ -3631,7 +3719,7 @@ const HomePage = () => {
         await toggleSystemProxy(false)
       }
       await invalidateProxyState()
-      await stopCore().catch(() => undefined)
+      await stopCore()
       if (!(await waitForCoreStopped())) {
         throw new Error('旧核心未能停止，已取消切换以避免加载错误配置')
       }
@@ -4907,7 +4995,9 @@ const HomePage = () => {
                   </Button>
                 )}
                 {importantStatus && (
-                  <Alert severity="warning">{importantStatus}</Alert>
+                  <Alert severity="warning" onClose={() => setStatus('')}>
+                    {importantStatus}
+                  </Alert>
                 )}
               </Stack>
             </Paper>
@@ -5272,6 +5362,7 @@ const HomePage = () => {
                           : 'info'
                       }
                       sx={{ py: 0.35 }}
+                      onClose={() => setStatus('')}
                     >
                       {importantStatus}
                     </Alert>
@@ -5341,9 +5432,21 @@ const HomePage = () => {
                       {isMacOS
                         ? '前往下载'
                         : updating
-                          ? `更新中 ${updPercent}%`
+                          ? updateInstalling
+                            ? '正在准备安装'
+                            : updPercent > 0
+                              ? `更新中 ${updPercent}%`
+                              : '正在下载更新'
                           : '立即更新'}
                     </Button>
+                    {updating && !updateInstalling && (
+                      <Button
+                        onClick={cancelUpdateDownload}
+                        sx={{ color: '#eafff8' }}
+                      >
+                        取消下载
+                      </Button>
+                    )}
                   </Box>
                 )}
 
@@ -6508,6 +6611,16 @@ const HomePage = () => {
                 <>
                   <Button
                     onClick={() => {
+                      setCode('')
+                      setCodeImportMessage('')
+                      setCodeImportPhase('input')
+                      setCodeDialogOpen(false)
+                    }}
+                  >
+                    取消
+                  </Button>
+                  <Button
+                    onClick={() => {
                       setCodeImportPhase('input')
                       setCodeImportMessage('')
                     }}
@@ -6561,7 +6674,9 @@ const HomePage = () => {
             <DialogContent sx={{ pt: 1.5 }}>
               <Stack spacing={1.6}>
                 {importantStatus && (
-                  <Alert severity="warning">{importantStatus}</Alert>
+                  <Alert severity="warning" onClose={() => setStatus('')}>
+                    {importantStatus}
+                  </Alert>
                 )}
                 <Typography sx={{ fontSize: 12, color: 'rgba(36,46,66,.62)' }}>
                   web 断网或无法导入提取码订阅时，可在此手动导入其它 Clash

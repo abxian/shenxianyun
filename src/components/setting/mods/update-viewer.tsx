@@ -16,6 +16,7 @@ import { showNotice } from '@/services/notice-service'
 import { useSetUpdateState, useUpdateState } from '@/services/states'
 import {
   downloadAndInstallWithFallback,
+  cancelAppUpdateDownload,
   macosDufsDownloadUrl,
   releaseUrlForVersion,
 } from '@/services/update'
@@ -121,6 +122,7 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
 
   const [downloaded, setDownloaded] = useState(0)
   const [total, setTotal] = useState(0)
+  const [installingUpdate, setInstallingUpdate] = useState(false)
   const [activeSource, setActiveSource] = useState<'dufs' | 'github'>('dufs')
   const downloadedRef = useRef(0)
   const totalRef = useRef(0)
@@ -170,6 +172,7 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
     }
     if (updateState) return
     setUpdateState(true)
+    setInstallingUpdate(false)
     setActiveSource('dufs')
     setDownloaded(0)
     setTotal(0)
@@ -182,6 +185,8 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
       chunkLength?: number | null
       contentLength?: number | null
     }) => {
+      if (event.phase === 'stopping' || event.phase === 'installing')
+        setInstallingUpdate(true)
       setActiveSource(event.source)
       if (event.phase === 'fallback') {
         totalRef.current = 0
@@ -220,6 +225,19 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
       downloadedRef.current = 0
       totalRef.current = 0
     }
+  })
+
+  const closeUpdateDialog = useLockFn(async () => {
+    if (updateState) {
+      if (
+        installingUpdate ||
+        (await cancelAppUpdateDownload()) === 'installing'
+      ) {
+        showNotice.info('正在准备安装，暂不能取消，请等待安装器启动')
+        return
+      }
+    }
+    setOpen(false)
   })
 
   return (
@@ -270,8 +288,8 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
       }}
       okBtn={t('settings.modals.update.actions.update')}
       cancelBtn={t('shared.actions.cancel')}
-      onClose={() => setOpen(false)}
-      onCancel={() => setOpen(false)}
+      onClose={closeUpdateDialog}
+      onCancel={closeUpdateDialog}
       onOk={onUpdate}
     >
       <Box

@@ -1,3 +1,6 @@
+mod download_control;
+mod download_progress;
+mod download_watchdog;
 use crate::{
     config::Config,
     core::notification::NotificationSystem,
@@ -7,17 +10,38 @@ use crate::{
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use clash_verge_logging::{Type, logging};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
+    sync::Arc,
     sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant},
 };
 use tauri::AppHandle;
 use tauri_plugin_updater::{Update, UpdaterExt as _};
 
 pub const UPDATE_FALLBACK_PROGRESS_EVENT: &str = "shenxianyun://update-fallback-progress";
 static INTERACTIVE_UPDATE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DOWNLOAD_CONTROL: Mutex<download_control::DownloadControl> =
+    Mutex::new(download_control::DownloadControl::new());
+
+pub fn cancel_interactive_download() -> &'static str {
+    let mut state = DOWNLOAD_CONTROL.lock();
+    if state.cancel() {
+        "cancelled"
+    } else if state.active() {
+        "installing"
+    } else {
+        "idle"
+    }
+}
+fn check_download_cancelled() -> Result<()> {
+    if DOWNLOAD_CONTROL.lock().cancelled() {
+        return Err(anyhow!("已取消更新下载"));
+    }
+    Ok(())
+}
 
 const DUFS_UPDATE_ENDPOINTS: &[&str] = &[
     "https://sxy.sxnn.de:5443/sxy/update.json",
@@ -65,13 +89,15 @@ impl InteractiveUpdateGuard {
     fn acquire() -> Result<Self> {
         INTERACTIVE_UPDATE_ACTIVE
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| Self)
-            .map_err(|_| anyhow!("an app update is already in progress"))
+            .map_err(|_| anyhow!("an app update is already in progress"))?;
+        DOWNLOAD_CONTROL.lock().begin();
+        Ok(Self)
     }
 }
 
 impl Drop for InteractiveUpdateGuard {
     fn drop(&mut self) {
+        DOWNLOAD_CONTROL.lock().finish();
         INTERACTIVE_UPDATE_ACTIVE.store(false, Ordering::Release);
     }
 }
@@ -119,10 +145,18 @@ async fn download_verified_update(
         .map(|endpoint| endpoint.parse())
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let updater = app_handle.updater_builder().endpoints(endpoints)?.build()?;
-    let update = updater
-        .check()
-        .await?
-        .ok_or_else(|| anyhow!("{} update metadata has no applicable update", source.label()))?;
+    check_download_cancelled()?;
+    let update = download_watchdog::watch(
+        updater.check(),
+        Arc::new(Mutex::new(Instant::now())),
+        Duration::from_secs(20),
+        Duration::from_secs(20),
+        Duration::from_millis(250),
+        || DOWNLOAD_CONTROL.lock().cancelled(),
+    )
+    .await
+    .map_err(anyhow::Error::msg)?
+    .ok_or_else(|| anyhow!("{} update metadata has no applicable update", source.label()))?;
 
     let remote_version = normalize_update_version(&update.version)
         .ok_or_else(|| anyhow!("{} update metadata has an invalid version", source.label()))?;
@@ -135,18 +169,40 @@ async fn download_verified_update(
         ));
     }
 
+    let last_progress = Arc::new(Mutex::new(Instant::now()));
+    let progress_clock = Arc::clone(&last_progress);
+    let progress = Arc::new(Mutex::new(download_progress::Progress::new(Instant::now())));
+    let finish_progress = Arc::clone(&progress);
     let progress_handle = app_handle.clone();
     let finish_handle = app_handle.clone();
-    let bytes = update
-        .download(
+    let bytes = {
+        let download = update.download(
             move |chunk_length, content_length| {
-                emit_update_progress(&progress_handle, source, "progress", Some(chunk_length), content_length);
+                *progress_clock.lock() = Instant::now();
+                let frame = progress.lock().add(chunk_length, content_length, Instant::now());
+                if let Some((bytes, length)) = frame {
+                    emit_update_progress(&progress_handle, source, "progress", Some(bytes), length);
+                }
             },
             move || {
+                let frame = finish_progress.lock().flush();
+                if let Some((bytes, length)) = frame {
+                    emit_update_progress(&finish_handle, source, "progress", Some(bytes), length);
+                }
                 emit_update_progress(&finish_handle, source, "downloaded", None, None);
             },
+        );
+        download_watchdog::watch(
+            download,
+            last_progress,
+            Duration::from_secs(20 * 60),
+            Duration::from_secs(45),
+            Duration::from_millis(250),
+            || DOWNLOAD_CONTROL.lock().cancelled(),
         )
-        .await?;
+        .await
+        .map_err(anyhow::Error::msg)?
+    };
 
     // Update::download only returns after the Tauri updater has verified the
     // package signature with the configured public key.
@@ -166,6 +222,7 @@ pub async fn install_update_with_fallback(app_handle: &AppHandle, expected_versi
     {
         Ok((update, bytes)) => (update, bytes, UpdateSource::Dufs),
         Err(dufs_error) => {
+            check_download_cancelled()?;
             logging!(
                 warn,
                 Type::System,
@@ -183,6 +240,15 @@ pub async fn install_update_with_fallback(app_handle: &AppHandle, expected_versi
         }
     };
 
+    if !DOWNLOAD_CONTROL.lock().install() {
+        return Err(anyhow!("已取消更新下载"));
+    }
+    emit_update_progress(app_handle, source, "stopping", None, None);
+    if !crate::feat::clean_for_update().await {
+        return Err(anyhow!(
+            "更新包已验证，但停止连接未完成；未运行安装器，请停止连接后重试"
+        ));
+    }
     emit_update_progress(app_handle, source, "installing", None, None);
 
     // install() 是同步阻塞调用。直接在 async 命令里调用会占住 tokio 运行时，
@@ -801,6 +867,7 @@ mod tests {
 
     #[test]
     fn test_interactive_update_guard_prevents_parallel_installers() {
+        DOWNLOAD_CONTROL.lock().finish();
         INTERACTIVE_UPDATE_ACTIVE.store(false, Ordering::Release);
         let guard = InteractiveUpdateGuard::acquire().unwrap();
         assert!(InteractiveUpdateGuard::acquire().is_err());

@@ -174,9 +174,21 @@ pub async fn restart_app() -> CmdResult<()> {
 /// 在应用内安装指定版本：Dufs 优先，下载或校验失败后自动切换 GitHub。
 #[tauri::command]
 pub async fn install_app_update_with_fallback(app_handle: AppHandle, expected_version: String) -> CmdResult<()> {
-    updater::install_update_with_fallback(&app_handle, expected_version.as_str())
-        .await
-        .stringify_err()
+    // Keep package I/O, signature verification and extraction off IPC workers.
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(updater::install_update_with_fallback(
+            &app_handle,
+            expected_version.as_str(),
+        ))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .stringify_err()
+}
+
+#[tauri::command]
+pub fn cancel_app_update_download() -> &'static str {
+    updater::cancel_interactive_download()
 }
 
 /// 删除旧配置并直接重启。这里不能调用常规 restart_app，因为常规重启会先把
