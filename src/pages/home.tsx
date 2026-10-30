@@ -5810,7 +5810,7 @@ const HomePage = () => {
                 <Typography sx={{ fontSize: 13, color: 'rgba(36,46,66,.66)' }}>
                   选择匹配类型、填写内容、选择要走的节点。例如「域名后缀
                   google.com 走日本节点」「IP 段 1.1.1.1/24 走 DIRECT」。
-                  自定义规则排在 api.sxnn.de 直连规则之后、订阅规则之前。
+                  自定义规则排在全部官网服务规则之后、订阅其他规则之前。
                 </Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
                   <FormControl size="small" sx={{ minWidth: 124 }}>

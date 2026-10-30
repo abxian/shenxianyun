@@ -41,7 +41,7 @@ try:
             work = Path(tmp)
             mixed, api = freeport(), freeport()
             config = Path(fixture).read_text().replace('mixed-port: 0', 'mixed-port: ' + str(mixed))
-            config += '\nbind-address: 127.0.0.1\nexternal-controller: 127.0.0.1:' + str(api) + '\nhosts:\n  example.com: 127.0.0.1\n'
+            config += '\nbind-address: 127.0.0.1\nexternal-controller: 127.0.0.1:' + str(api) + '\nhosts:\n  example.com: 127.0.0.1\n  sxnn.de: 127.0.0.1\n  sxy.sxnn.de: 127.0.0.1\n'
             (work / 'config.yaml').write_text(config)
             subprocess.run([sys.argv[1], '-t', '-d', tmp], check=True, stdout=subprocess.DEVNULL)
             with (work / 'core.log').open('wb') as log:
@@ -58,10 +58,19 @@ try:
                     else:
                         raise AssertionError('rules API not ready')
                     assert rules[0]['payload'] == 'api.sxnn.de' and rules[0]['proxy'] == 'DIRECT', rules
-                    assert rules[1]['payload'] == 'example.com', rules
-                    assert rules[1]['proxy'] == ('DIRECT' if edited else 'REJECT'), rules
+                    by_payload = {rule['payload']: rule for rule in rules if rule['type'] != 'DomainSuffix'}
+                    assert by_payload['sxnn.de']['proxy'] == 'REJECT', rules
+                    assert by_payload['www.sxnn.de']['proxy'] == 'REJECT', rules
+                    assert by_payload['sxy.sxnn.de']['proxy'] == 'DIRECT', rules
+                    official_end = rules.index(by_payload['sxy.sxnn.de'])
+                    ordinary_index = next(i for i, rule in enumerate(rules) if rule['payload'] == 'acl4.ssr')
                     if edited:
-                        assert rules[2]['payload'] == 'legacy.example' and rules[2]['proxy'] == 'REJECT', rules
+                        assert rules[official_end + 1]['payload'] == 'example.com' and rules[official_end + 1]['proxy'] == 'DIRECT', rules
+                        assert rules[ordinary_index - 1]['payload'] == 'legacy.example', rules
+                    else:
+                        assert ordinary_index == official_end + 1, rules
+                    for rule in rules[1:official_end + 1]:
+                        assert rule['payload'] in ['5443', 'sxnn.de', 'www.sxnn.de', 'sxy.sxnn.de'], rules
                     for _ in range(100):
                         try:
                             with socket.create_connection(('127.0.0.1', mixed), timeout=1):

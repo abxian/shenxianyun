@@ -23,8 +23,8 @@ with tempfile.TemporaryDirectory(prefix='sxnn-rules272-') as tmp:
         # Exact production function output, not a handwritten expected config.
         (work / 'src/main.rs').write_text('''use rule_editor_check::editor_rules;
 fn main() {
- let mut config = serde_yaml_ng::from_str("mixed-port: 0\\nmode: rule\\nproxies: []\\nproxy-groups: []\\nrules: ['DOMAIN-SUFFIX,example.com,REJECT', 'MATCH,DIRECT']").unwrap();
- let edits = serde_yaml_ng::from_str("prepend-rules: ['DOMAIN-SUFFIX,example.com,DIRECT']\\nappend-rules: ['DOMAIN,legacy.example,REJECT']").unwrap();
+ let mut config = serde_yaml_ng::from_str("mixed-port: 0\\nmode: rule\\nproxies: []\\nproxy-groups: []\\nrules: ['DST-PORT,5443,DIRECT', 'DOMAIN,sxnn.de,REJECT', 'DOMAIN,www.sxnn.de,REJECT', 'DOMAIN,api.sxnn.de,DIRECT', 'DOMAIN,sxy.sxnn.de,DIRECT', 'DOMAIN-SUFFIX,acl4.ssr,DIRECT', 'DOMAIN-SUFFIX,example.com,REJECT', 'MATCH,DIRECT']").unwrap();
+ let edits = serde_yaml_ng::from_str("prepend-rules: ['DOMAIN-SUFFIX,example.com,DIRECT', 'DOMAIN-SUFFIX,sxnn.de,DIRECT']\\nappend-rules: ['DOMAIN,legacy.example,REJECT']").unwrap();
  let deleted = std::env::args().any(|arg| arg == "--deleted");
  let edits = if deleted { serde_yaml_ng::Mapping::new() } else { edits };
  editor_rules::apply(&mut config, &edits).unwrap();

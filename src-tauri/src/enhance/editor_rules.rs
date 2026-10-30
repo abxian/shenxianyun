@@ -27,17 +27,54 @@ pub fn apply(config: &mut Mapping, edits: &Mapping) -> Result<(), String> {
         None => Sequence::new(),
         Some(_) => return Err("rules must be a list".into()),
     };
+    // Server-managed services form a leading block. Keep its order and policies
+    // (some official hosts deliberately use the proxy group), then add user edits.
+    let official_end = existing.iter().take_while(|rule| is_official_rule(rule)).count();
     let mut rules = vec![Value::String(API_DIRECT.into())];
-    rules.extend(custom);
+    let mut official_seen = HashSet::from([API_DIRECT.to_owned()]);
+    for rule in &existing[..official_end] {
+        let normalized = rule.as_str().map(normalize).unwrap_or_default();
+        if official_seen.insert(normalized) {
+            rules.push(rule.clone());
+        }
+    }
     rules.extend(
-        existing
+        custom
             .into_iter()
-            .filter(|rule| rule.as_str().is_none_or(|raw| !added.contains(&normalize(raw)))),
+            .filter(|rule| rule.as_str().is_none_or(|raw| !official_seen.contains(&normalize(raw)))),
     );
+    rules.extend(existing.into_iter().skip(official_end).filter(|rule| {
+        rule.as_str().is_none_or(|raw| {
+            let normalized = normalize(raw);
+            !added.contains(&normalized) && !official_seen.contains(&normalized)
+        })
+    }));
     config.insert("rules".into(), Value::Sequence(rules));
     config.remove("prepend-rules");
     config.remove("append-rules");
     Ok(())
+}
+
+// Match actual service families, never every DIRECT rule or an arbitrary row count.
+// New service families must be added here when the backend's official domains move.
+fn is_official_rule(rule: &Value) -> bool {
+    let Some(raw) = rule.as_str() else {
+        return false;
+    };
+    let parts = raw.split(',').map(str::trim).collect::<Vec<_>>();
+    if parts.len() < 3 {
+        return false;
+    }
+    let kind = parts[0].to_ascii_uppercase();
+    let value = parts[1].trim_end_matches('.').to_ascii_lowercase();
+    match kind.as_str() {
+        "DOMAIN" | "DOMAIN-SUFFIX" => ["sxnn.de", "jc116.com"]
+            .iter()
+            .any(|root| value == *root || value.ends_with(&format!(".{root}"))),
+        "IP-CIDR" => value == "114.80.36.225/32",
+        "DST-PORT" => parts[2] == "DIRECT" && value.parse::<u16>().is_ok_and(|port| port > 0),
+        _ => false,
+    }
 }
 
 fn normalize(rule: &str) -> String {
@@ -51,6 +88,41 @@ mod tests {
 
     fn mapping(yaml: &str) -> TestResult<Mapping> {
         Ok(serde_yaml_ng::from_str(yaml)?)
+    }
+
+    #[test]
+    fn full_official_block_precedes_edits_and_keeps_proxy_policies() -> TestResult {
+        let edits = mapping("prepend-rules: ['DOMAIN-SUFFIX,sxnn.de,REJECT', 'DOMAIN-SUFFIX,example.com,Test']")?;
+        let mut config = mapping(
+            "rules: ['DST-PORT,5443,DIRECT', 'DOMAIN,sxnn.de,Test', 'DOMAIN,www.sxnn.de,Test', 'DOMAIN,api.sxnn.de,DIRECT', 'DOMAIN,sxy.sxnn.de,DIRECT', 'DOMAIN-SUFFIX,acl4.ssr,DIRECT', 'MATCH,Test']",
+        )?;
+        apply(&mut config, &edits)?;
+        assert_eq!(
+            config["rules"],
+            mapping(
+                "rules: ['DOMAIN,api.sxnn.de,DIRECT', 'DST-PORT,5443,DIRECT', 'DOMAIN,sxnn.de,Test', 'DOMAIN,www.sxnn.de,Test', 'DOMAIN,sxy.sxnn.de,DIRECT', 'DOMAIN-SUFFIX,sxnn.de,REJECT', 'DOMAIN-SUFFIX,example.com,Test', 'DOMAIN-SUFFIX,acl4.ssr,DIRECT', 'MATCH,Test']"
+            )?["rules"]
+        );
+        let once = config.clone();
+        apply(&mut config, &edits)?;
+        assert_eq!(config, once);
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_direct_and_lookalike_domains_stay_below_edits() -> TestResult {
+        let edits = mapping("prepend-rules: ['DOMAIN,example.com,Test']")?;
+        let mut config = mapping(
+            "rules: ['DOMAIN-SUFFIX,jc116.com,DIRECT', 'IP-CIDR,114.80.36.225/32,DIRECT,no-resolve', 'DOMAIN,evil-sxnn.de,DIRECT', 'DOMAIN,sxnn.de.evil.example,DIRECT', 'DOMAIN-SUFFIX,lan,DIRECT', 'MATCH,Test']",
+        )?;
+        apply(&mut config, &edits)?;
+        assert_eq!(
+            config["rules"],
+            mapping(
+                "rules: ['DOMAIN,api.sxnn.de,DIRECT', 'DOMAIN-SUFFIX,jc116.com,DIRECT', 'IP-CIDR,114.80.36.225/32,DIRECT,no-resolve', 'DOMAIN,example.com,Test', 'DOMAIN,evil-sxnn.de,DIRECT', 'DOMAIN,sxnn.de.evil.example,DIRECT', 'DOMAIN-SUFFIX,lan,DIRECT', 'MATCH,Test']"
+            )?["rules"]
+        );
+        Ok(())
     }
 
     #[test]
