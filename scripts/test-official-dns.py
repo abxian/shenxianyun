@@ -1,6 +1,7 @@
 """Test the exact shared DNS/selector modules without building the GUI.
 
-Python3 + Rust/Cargo and cached locked crates. Temporary synthetic config only;
+Python3 + Rust/Cargo and cached locked crates. CI can fetch missing locked crates
+with --fetch-dependencies before the offline checks. Temporary synthetic config only;
 no app, VPN, system proxy, subscriptions or public network requests. Optional
 --fixture-program copies the production enhancer harness for live core checks.
 """
@@ -16,6 +17,7 @@ import tempfile
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--fixture-program', type=Path)
+    parser.add_argument('--fetch-dependencies', action='store_true')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix='sxnn-dns279-') as temporary:
@@ -38,6 +40,9 @@ def main():
             'official_dns::apply(&mut config).unwrap();'
             'print!("{}",serde_yaml_ng::to_string(&config).unwrap());}')
         env = dict(os.environ, CARGO_TARGET_DIR=str(root / 'node_modules/.cache/official-dns-check'))
+        if args.fetch_dependencies:
+            subprocess.run(['cargo', 'fetch', '--manifest-path', str(work / 'Cargo.toml')],
+                           env=env, check=True)
         subprocess.run(['cargo', 'test', '--offline', '--manifest-path', str(work / 'Cargo.toml'), '--lib'],
                        env=env, check=True)
         subprocess.run(['cargo', 'clippy', '--offline', '--manifest-path', str(work / 'Cargo.toml'),
