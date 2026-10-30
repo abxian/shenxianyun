@@ -47,50 +47,45 @@ fn normalize(rule: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-    fn mapping(yaml: &str) -> Mapping {
-        serde_yaml_ng::from_str(yaml).expect("valid rule editor fixture")
+    fn mapping(yaml: &str) -> TestResult<Mapping> {
+        Ok(serde_yaml_ng::from_str(yaml)?)
     }
 
     #[test]
-    fn old_editor_files_become_real_rules_after_api_before_subscription() {
-        let edits = mapping(
-            "prepend-rules: ['DOMAIN-SUFFIX,example.com,DIRECT', 'DOMAIN,api.sxnn.de,DIRECT']\nappend-rules: ['IP-CIDR,192.0.2.0/24,Test']",
-        );
-        let mut config =
-            mapping("rules: ['DOMAIN-SUFFIX,de,DIRECT', 'MATCH,Test']\nprepend-rules: []\nappend-rules: []\n");
-        apply(&mut config, &edits).expect("valid rule editor fixture");
-        assert_eq!(
-            config["rules"],
-            mapping(
-                "rules: ['DOMAIN,api.sxnn.de,DIRECT', 'DOMAIN-SUFFIX,example.com,DIRECT', 'IP-CIDR,192.0.2.0/24,Test', 'DOMAIN-SUFFIX,de,DIRECT', 'MATCH,Test']"
-            )["rules"]
-        );
+    fn old_editor_files_become_real_rules_after_api_before_subscription() -> TestResult {
+        let edits = mapping("prepend-rules: ['DOMAIN-SUFFIX,example.com,DIRECT', 'DOMAIN,api.sxnn.de,DIRECT']\nappend-rules: ['IP-CIDR,192.0.2.0/24,Test']")?;
+        let mut config = mapping("rules: ['DOMAIN-SUFFIX,de,DIRECT', 'MATCH,Test']\nprepend-rules: []\nappend-rules: []")?;
+        apply(&mut config, &edits)?;
+        assert_eq!(config["rules"], mapping("rules: ['DOMAIN,api.sxnn.de,DIRECT', 'DOMAIN-SUFFIX,example.com,DIRECT', 'IP-CIDR,192.0.2.0/24,Test', 'DOMAIN-SUFFIX,de,DIRECT', 'MATCH,Test']")?["rules"]);
         assert!(!config.contains_key("prepend-rules"));
         assert!(!config.contains_key("append-rules"));
+        Ok(())
     }
 
     #[test]
-    fn refresh_and_reload_are_idempotent_and_keep_other_fields() {
-        let edits = mapping("prepend-rules: ['DOMAIN,example.com,Test', 'DOMAIN,example.com,Test']");
-        let mut config =
-            mapping("mode: rule\nrules: ['DOMAIN, api.sxnn.de, DIRECT', 'DOMAIN,example.com,Test', 'MATCH,Test']");
-        apply(&mut config, &edits).expect("valid rule editor fixture");
-        let saved = serde_yaml_ng::to_string(&config).expect("valid rule editor fixture");
-        apply(&mut config, &edits).expect("valid rule editor fixture");
-        assert_eq!(saved, serde_yaml_ng::to_string(&config).expect("valid rule editor fixture"));
+    fn refresh_and_reload_are_idempotent_and_keep_other_fields() -> TestResult {
+        let edits = mapping("prepend-rules: ['DOMAIN,example.com,Test', 'DOMAIN,example.com,Test']")?;
+        let mut config = mapping("mode: rule\nrules: ['DOMAIN, api.sxnn.de, DIRECT', 'DOMAIN,example.com,Test', 'MATCH,Test']")?;
+        apply(&mut config, &edits)?;
+        let saved = serde_yaml_ng::to_string(&config)?;
+        apply(&mut config, &edits)?;
+        assert_eq!(saved, serde_yaml_ng::to_string(&config)?);
         assert_eq!(config["mode"], Value::String("rule".into()));
-        let mut refreshed = mapping("rules: ['DOMAIN,updated.example,DIRECT', 'MATCH,Test']");
-        apply(&mut refreshed, &edits).expect("valid rule editor fixture");
-        assert_eq!(refreshed["rules"].as_sequence().expect("valid rule editor fixture").len(), 4);
+        let mut refreshed = mapping("rules: ['DOMAIN,updated.example,DIRECT', 'MATCH,Test']")?;
+        apply(&mut refreshed, &edits)?;
+        assert_eq!(refreshed["rules"], mapping("rules: ['DOMAIN,api.sxnn.de,DIRECT', 'DOMAIN,example.com,Test', 'DOMAIN,updated.example,DIRECT', 'MATCH,Test']")?["rules"]);
+        Ok(())
     }
 
     #[test]
-    fn deletion_restores_subscription_order_and_invalid_edits_fail() {
-        let mut config = mapping("rules: ['DOMAIN,example.com,Test', 'MATCH,Test']");
-        apply(&mut config, &Mapping::new()).expect("valid rule editor fixture");
-        assert_eq!(config["rules"].as_sequence().expect("valid rule editor fixture").len(), 3);
-        assert!(apply(&mut config, &mapping("prepend-rules: invalid")).is_err());
-        assert!(apply(&mut config, &mapping("prepend-rules: [123]")).is_err());
+    fn deletion_restores_subscription_order_and_invalid_edits_fail() -> TestResult {
+        let mut config = mapping("rules: ['DOMAIN,example.com,Test', 'MATCH,Test']")?;
+        apply(&mut config, &Mapping::new())?;
+        assert_eq!(config["rules"], mapping("rules: ['DOMAIN,api.sxnn.de,DIRECT', 'DOMAIN,example.com,Test', 'MATCH,Test']")?["rules"]);
+        assert!(apply(&mut config, &mapping("prepend-rules: invalid")?).is_err());
+        assert!(apply(&mut config, &mapping("prepend-rules: [123]")?).is_err());
+        Ok(())
     }
 }
