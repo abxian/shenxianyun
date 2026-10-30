@@ -35,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix='sxy-accounting-') as tmp:
  def transfer(host):
   with socket.create_connection(('127.0.0.1',mixed),timeout=5) as s:
    url='http://'+host+':'+str(origin.server_address[1])+'/payload'
-   s.sendall(('GET '+url+' HTTP/1.1\r\nHost: '+host+'\r\nConnection: close\r\n\r\n').encode());data=b''
+   s.sendall(('GET '+url+' HTTP/1.1\r\nHost: '+host+':'+str(origin.server_address[1])+'\r\nConnection: close\r\n\r\n').encode());data=b''
    while True:
     chunk=s.recv(65536)
     if not chunk:break
