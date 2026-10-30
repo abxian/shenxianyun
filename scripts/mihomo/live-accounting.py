@@ -46,6 +46,13 @@ with tempfile.TemporaryDirectory(prefix='sxy-accounting-') as tmp:
    try:baseline=stats();break
    except Exception:time.sleep(.1)
   else:raise RuntimeError('core startup failed')
+  # Controller starts before listeners/rules are fully activated. Wait for a
+  # real direct transfer, rather than mistaking the early controller for ready.
+  for attempt in range(100):
+   try:transfer('direct.test');break
+   except (OSError,AssertionError):time.sleep(.1)
+  else:raise RuntimeError('core listener did not become ready')
+  baseline=stats()
   assert baseline['proxyUploadTotal']==0 and baseline['proxyDownloadTotal']==0
   transfer('direct.test');direct=stats()
   assert direct['downloadTotal']>=65536 and direct['proxyDownloadTotal']==0 and direct['proxyUploadTotal']==0
