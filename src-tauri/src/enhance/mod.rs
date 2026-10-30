@@ -1,5 +1,6 @@
 mod automatic;
 mod chain;
+mod editor_rules;
 pub mod field;
 mod merge;
 mod script;
@@ -606,6 +607,10 @@ pub async fn enhance() -> Result<(Mapping, HashSet<String>, HashMap<String, Resu
     let proxies_item = profile.proxies_item;
     let groups_item = profile.groups_item;
     let global_merge = profile.global_merge;
+    let editor_rules = match &global_merge.data {
+        ChainType::Merge(merge) => merge.clone(),
+        _ => Mapping::new(),
+    };
     let global_script = profile.global_script;
     let profile_name = profile.profile_name;
 
@@ -651,6 +656,8 @@ pub async fn enhance() -> Result<(Mapping, HashSet<String>, HashMap<String, Resu
 
     // dns settings
     config = apply_dns_settings(config, enable_dns_settings).await;
+
+    editor_rules::apply(&mut config, &editor_rules).map_err(anyhow::Error::msg)?;
 
     let mut exists_keys_set = HashSet::new();
     exists_keys_set.extend(exists_keys);

@@ -18,12 +18,18 @@ jobs:
           go-version: stable
           cache: false
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify production rule enhancement
+        run: python3 scripts/test-rule-editor-core.py "$RUNNER_TEMP/rules-edited.yaml" "$RUNNER_TEMP/rules-deleted.yaml"
+
       - name: Verify exact proxy accounting core and real loopback traffic
         run: |
           python3 scripts/build-proxy-core.py x86_64-pc-windows-msvc --test-only
           work=$(find node_modules/.verge/proxy-core -mindepth 1 -maxdepth 1 -type d | head -1)
           (cd "$work" && go build -tags with_gvisor -o "$RUNNER_TEMP/accounting-core" .)
           python3 scripts/mihomo/live-accounting.py "$RUNNER_TEMP/accounting-core"
+          python3 scripts/test-rule-editor-live.py "$RUNNER_TEMP/accounting-core" "$RUNNER_TEMP/rules-edited.yaml" "$RUNNER_TEMP/rules-deleted.yaml"
 
       - name: Check release compatibility and version carriers
         run: |
@@ -106,6 +112,9 @@ jobs:
 
       - name: Code switch disconnect transaction tests
         run: pnpm test:code-switch
+
+      - name: Rule editor persistence and failure tests
+        run: node --experimental-strip-types --test scripts/test-traffic-rule-editor.mjs
 
       - name: Run managed subscription presentation tests
         if: steps.check_frontend.outputs.frontend == 'true'

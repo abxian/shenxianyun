@@ -161,6 +161,13 @@ import {
   type SubscriptionMonitor,
 } from '@/services/subscription-monitor'
 import {
+  DOMESTIC_API_DIRECT_RULE,
+  pinApiDirect,
+  upsertTrafficRule,
+  removeTrafficRule,
+  saveRuleEdit,
+} from '@/services/traffic-rule-editor'
+import {
   downloadAndInstallWithFallback,
   macosDufsDownloadUrl,
   releaseUrlForVersion,
@@ -680,8 +687,6 @@ const restoreRuleSnapshot = async (
   if (!saved) throw new Error('规则恢复后的配置验证失败')
 }
 
-const DOMESTIC_API_DIRECT_RULE = 'DOMAIN,api.sxnn.de,DIRECT'
-
 const isDomesticApiUrl = (url: string): boolean => {
   try {
     return new URL(url).hostname === 'api.sxnn.de'
@@ -700,16 +705,17 @@ const ensureDomesticApiDirect = async () => {
   const prepend = Array.isArray(data['prepend-rules'])
     ? (data['prepend-rules'] as unknown[])
     : []
-  data['prepend-rules'] = [
-    DOMESTIC_API_DIRECT_RULE,
-    ...prepend.filter((rule) => rule !== DOMESTIC_API_DIRECT_RULE),
-  ]
   if (
     prepend[0] === DOMESTIC_API_DIRECT_RULE &&
     prepend.filter((rule) => rule === DOMESTIC_API_DIRECT_RULE).length === 1
   )
     return
-  if (!(await saveProfileFile('Merge', yaml.dump(data, { lineWidth: -1 })))) {
+  if (
+    !(await saveProfileFile(
+      'Merge',
+      yaml.dump(pinApiDirect(data), { lineWidth: -1 }),
+    ))
+  ) {
     throw new Error('国内 API 直连规则验证失败')
   }
   // saveProfileFile already validates and applies runtime-affecting files.
@@ -4600,28 +4606,12 @@ const HomePage = () => {
   const saveTrafficRuleAppend = async (nextRule: string) => {
     const content = await readProfileFile(rulesProfileUid)
     const data = (yaml.load(content) as Record<string, unknown> | null) || {}
-    const next = parseTrafficRule(nextRule)
-    const removeSameTarget = (rules: unknown[]) =>
-      rules.filter((rule) => {
-        const parsed = parseTrafficRule(rule)
-        return (
-          !parsed ||
-          !next ||
-          !(parsed.type === next.type && parsed.value === next.value)
-        )
-      })
-
-    if (Array.isArray(data['append-rules'])) {
-      data['append-rules'] = removeSameTarget(data['append-rules'] as unknown[])
-    }
-    const prepend = Array.isArray(data['prepend-rules'])
-      ? (data['prepend-rules'] as unknown[])
-      : []
-    // 放在最前，优先级高于订阅自带规则
-    data['prepend-rules'] = [nextRule, ...removeSameTarget(prepend)]
-
-    await saveProfileFile(rulesProfileUid, yaml.dump(data, { lineWidth: -1 }))
-    await enhanceProfiles()
+    await saveRuleEdit(() =>
+      saveProfileFile(
+        rulesProfileUid,
+        yaml.dump(upsertTrafficRule(data, nextRule), { lineWidth: -1 }),
+      ),
+    )
   }
 
   const addTrafficRule = useLockFn(async () => {
@@ -4663,15 +4653,12 @@ const HomePage = () => {
     try {
       const content = await readProfileFile(rulesProfileUid)
       const data = (yaml.load(content) as Record<string, unknown> | null) || {}
-      for (const key of ['prepend-rules', 'append-rules']) {
-        if (Array.isArray(data[key])) {
-          data[key] = (data[key] as unknown[]).filter(
-            (rule) => rule !== target.raw,
-          )
-        }
-      }
-      await saveProfileFile(rulesProfileUid, yaml.dump(data, { lineWidth: -1 }))
-      await enhanceProfiles()
+      await saveRuleEdit(() =>
+        saveProfileFile(
+          rulesProfileUid,
+          yaml.dump(removeTrafficRule(data, target.raw), { lineWidth: -1 }),
+        ),
+      )
       await loadTrafficRules()
       await refreshAll()
       setStatus(`已删除规则：${target.value}`)
@@ -5823,6 +5810,7 @@ const HomePage = () => {
                 <Typography sx={{ fontSize: 13, color: 'rgba(36,46,66,.66)' }}>
                   选择匹配类型、填写内容、选择要走的节点。例如「域名后缀
                   google.com 走日本节点」「IP 段 1.1.1.1/24 走 DIRECT」。
+                  自定义规则排在 api.sxnn.de 直连规则之后、订阅规则之前。
                 </Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
                   <FormControl size="small" sx={{ minWidth: 124 }}>
