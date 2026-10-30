@@ -26,6 +26,9 @@ jobs:
       - name: Verify production rule enhancement
         run: python3 scripts/test-rule-editor-core.py "$RUNNER_TEMP/rules-edited.yaml" "$RUNNER_TEMP/rules-deleted.yaml"
 
+      - name: Verify official DNS and direct-group defaults
+        run: python3 scripts/test-official-dns.py
+
       - name: Verify exact proxy accounting core and real loopback traffic
         run: |
           python3 scripts/test-core-targets.py

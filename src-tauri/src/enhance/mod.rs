@@ -3,6 +3,7 @@ mod chain;
 mod editor_rules;
 pub mod field;
 mod merge;
+mod official_dns;
 mod script;
 pub mod seq;
 mod tun;
@@ -657,6 +658,7 @@ pub async fn enhance() -> Result<(Mapping, HashSet<String>, HashMap<String, Resu
     // dns settings
     config = apply_dns_settings(config, enable_dns_settings).await;
 
+    official_dns::apply(&mut config).map_err(anyhow::Error::msg)?;
     editor_rules::apply(&mut config, &editor_rules).map_err(anyhow::Error::msg)?;
 
     let mut exists_keys_set = HashSet::new();

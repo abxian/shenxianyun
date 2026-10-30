@@ -7,6 +7,11 @@ fn text<'a>(map: &'a Mapping, key: &str) -> &'a str {
     map.get(key).and_then(Value::as_str).unwrap_or_default()
 }
 
+fn primary_selector(group: &Mapping) -> bool {
+    text(group, "type") == "select"
+        && (text(group, "name").contains("节点") || text(group, "name").eq_ignore_ascii_case("proxy"))
+}
+
 fn tune_health(group: &mut Mapping) {
     for (key, value) in [
         ("url", Value::from(TEST_URL)),
@@ -61,11 +66,7 @@ pub fn ensure_automatic_selection(config: &mut Mapping) {
             .iter()
             .enumerate()
             .filter_map(|(index, value)| value.as_mapping().map(|group| (index, group)))
-            .find(|(_, group)| {
-                text(group, "type") == "select"
-                    && text(group, "name") != "GLOBAL"
-                    && (text(group, "name").contains("节点") || text(group, "name").eq_ignore_ascii_case("proxy"))
-            });
+            .find(|(_, group)| primary_selector(group));
         if let Some((primary_index, primary)) = primary {
             let leaves: Vec<Value> = primary
                 .get("proxies")
@@ -133,7 +134,10 @@ pub fn ensure_automatic_selection(config: &mut Mapping) {
         let Some(selector) = item.as_mapping_mut() else {
             continue;
         };
-        if text(selector, "type") != "select" {
+        // Service groups may deliberately default to DIRECT or REJECT. Moving
+        // automatic ahead of those changes their routing, including DNS when
+        // respect-rules is enabled. Only the node selector gets this default.
+        if !primary_selector(selector) {
             continue;
         }
         if Some(position) == new_primary && !selector.contains_key("proxies") {
@@ -243,5 +247,18 @@ mod tests {
         let before = config.clone();
         ensure_automatic_selection(&mut config);
         assert_eq!(config, before);
+    }
+
+    #[test]
+    fn direct_and_service_group_defaults_are_not_reordered() {
+        let mut config = parse(
+            "proxies: [{name: A, type: ss, server: example.test}]\nproxy-groups: [{name: 🚀 节点选择, type: select, proxies: [A, ♻️ 自动选择]}, {name: ♻️ 自动选择, type: url-test, proxies: [A]}, {name: 🎯 全球直连, type: select, proxies: [DIRECT, 🚀 节点选择, ♻️ 自动选择]}, {name: 广告过滤, type: select, proxies: [REJECT, ♻️ 自动选择]}]",
+        );
+        let before = config["proxy-groups"].as_sequence().expect("groups").clone();
+        ensure_automatic_selection(&mut config);
+        let groups = config["proxy-groups"].as_sequence().expect("groups");
+        assert_eq!(groups[0]["proxies"][0].as_str(), Some("♻️ 自动选择"));
+        assert_eq!(groups[2], before[2]);
+        assert_eq!(groups[3], before[3]);
     }
 }
