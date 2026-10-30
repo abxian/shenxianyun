@@ -110,9 +110,11 @@ def main():
             target.chmod(0o755)
         assert hashlib.sha256(target.read_bytes()).hexdigest() == binary_sha
     (sidecar / ('proxy-accounting-' + args.target + '.json')).write_text(json.dumps({
-        **plan, 'upstream': SHA, 'patch_sha256': digest, 'binary_sha256': binary_sha,
+        **{k: v for k, v in plan.items() if k != 'core_names'},
+        'stable_and_alpha_identical': True,
+        'upstream': SHA, 'patch_sha256': digest, 'binary_sha256': binary_sha,
         'binary_format_and_architecture_verified': True,
-    }, indent=2))
+    }, indent=2) + "\n")
     print('Accounting sidecars verified:', args.target, binary_sha)
 
 
