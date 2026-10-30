@@ -13,6 +13,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Verify exact proxy accounting core and real loopback traffic
+        run: |
+          python3 scripts/build-proxy-core.py x86_64-pc-windows-msvc --test-only
+          work=$(find node_modules/.verge/proxy-core -mindepth 1 -maxdepth 1 -type d | head -1)
+          (cd "$work" && go build -tags with_gvisor -o "$RUNNER_TEMP/accounting-core" .)
+          python3 scripts/mihomo/live-accounting.py "$RUNNER_TEMP/accounting-core"
+
       - name: Check release compatibility and version carriers
         run: |
           node scripts/check-version-sync.mjs
