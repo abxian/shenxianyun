@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix='sxy-accounting-') as tmp:
     chunk=s.recv(65536)
     if not chunk:break
     data+=chunk
-   assert data.endswith(b'x'*65536)
+   assert data.endswith(b'x'*65536), repr(data[:500])
  try:
   for i in range(100):
    try:baseline=stats();break
@@ -53,5 +53,7 @@ with tempfile.TemporaryDirectory(prefix='sxy-accounting-') as tmp:
   proxied=stats();assert proxied['proxyDownloadTotal']>=5*65536 and proxied['proxyUploadTotal']>0
   transfer('direct.test');final=stats();assert final['proxyDownloadTotal']==proxied['proxyDownloadTotal'] and final['proxyUploadTotal']==proxied['proxyUploadTotal']
   print(json.dumps({'direct_excluded':True,'short_closed_proxy_preserved':True,'proxied_upload':proxied['proxyUploadTotal'],'proxied_download':proxied['proxyDownloadTotal'],'direct_after_proxy_excluded':True}))
+ except Exception:
+  log.flush();print((p/'core.log').read_text(),file=sys.stderr);raise
  finally:
   core.terminate();core.wait(timeout=10);log.close();origin.shutdown();upstream.shutdown()
