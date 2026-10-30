@@ -3859,6 +3859,7 @@ const HomePage = () => {
           )
         }
         setCodeImportPhase('error')
+        setCodeDialogOpen(false)
         setStatus('暂未导入，请检查提取码或网络后重试')
         setCodeImportMessage(
           recoveryFailure
@@ -3976,6 +3977,7 @@ const HomePage = () => {
       if (startAfterImport)
         setStatus('启动失败，已保留原订阅，请检查提取码或网络后重试')
       updatePhase('error')
+      setCodeDialogOpen(false)
       setStatus('暂未导入，请检查提取码或网络后重试')
       setCodeImportMessage(
         recoveryFailure
