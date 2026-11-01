@@ -209,3 +209,10 @@ curl -T 神仙云.rpm "$DUFS/神仙云.rpm"
 ## License
 
 GPL-3.0 License. See [License here](./LICENSE) for details.
+
+
+### 2026-11-01 管理请求退路（task317）
+
+规则模式保留国内官网优先，失败才使用固定租户ll.sxnn.de通道；两种模式继续受控主动上报。`src/services/managed-relay.ts`缓存短期grant到原加密managed-auth，不存原token到公开队列。counter的冻结pending/observed_at与累计值一起持久化，202不清pending，仅主站事务成功或relay最终applied清除；同counter/seq不重复计量。订阅实时鉴权请求固定上游，不缓存旧配置，401/403不绕过授权重试。
+
+`src-tauri/src/enhance/management.rs`生成仅127.0.0.1随机端口的mixed入站，`proxy:DIRECT`在Mihomo特殊入站优先级下先于global选择；官网管理请求可经此入口避免TUN全球出口影响，不修改用户mode/选中节点/正常业务规则。端口同进程稳定、随核心配置重新生成，未运行核心时仍尝试原站直连。纯本机隔离真实Mihomo测试：GLOBAL=REJECT时普通mixed失败、管理入站HTTP200。客户端云构建/发布与真机验收另行记录，版本号和正式分发本轮不改。

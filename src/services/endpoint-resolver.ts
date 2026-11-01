@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 
 import { cloneHttpRequestInit } from '@/services/http-request-init'
@@ -72,6 +73,10 @@ const normalizeProxy = (value: unknown): string => {
 }
 
 // 所有官方接口都执行完整 TLS 校验，不在客户端绕过无效证书。
+let managementProxy: Promise<string> | undefined
+export const getManagementProxy = () =>
+  (managementProxy ||= invoke<string>('management_proxy_url'))
+
 export const fetchWithVerifiedTls = async (
   url: string,
   init: Parameters<typeof tauriFetch>[1],
