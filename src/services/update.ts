@@ -8,6 +8,8 @@ import {
 
 import { version as appVersion } from '@root/package.json'
 
+import { getManagementProxy } from './endpoint-resolver'
+
 export type VersionParts = {
   main: number[]
   pre: (number | string)[]
@@ -155,7 +157,22 @@ const localVersionNormalized = normalizeVersion(appVersion)
 export const checkUpdateSafe = async (
   options?: CheckOptions,
 ): Promise<Update | null> => {
-  const result = await check({ ...(options ?? {}), allowDowngrades: false })
+  let result: Update | null
+  try {
+    const directProxy = options?.proxy || (await getManagementProxy())
+    result = await check({
+      timeout: 6000,
+      ...options,
+      proxy: directProxy,
+      allowDowngrades: false,
+    })
+  } catch {
+    result = await check({
+      timeout: 6000,
+      ...(options ?? {}),
+      allowDowngrades: false,
+    })
+  }
   if (!result) return null
 
   const remoteVersion = resolveRemoteVersion(result)
