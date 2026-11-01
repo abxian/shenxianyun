@@ -129,6 +129,7 @@ import {
 import { loadManagedContent } from '@/services/managed-download-recovery'
 import {
   fetchSubscriptionWithRelay,
+  fetchControlWithRelay,
   fetchEntryWithRelay,
   prepareRelay,
   sendTrafficWithRelay,
@@ -1248,10 +1249,12 @@ const HomePage = () => {
             ) ||
             url === managedAuthRef.current?.subscriptionUrl
           if (official) {
-            return fetchOfficialManagement(url, guarded, {
-              fetch: fetchWithVerifiedTls,
-              directProxy: getManagementProxy,
-            })
+            return fetchControlWithRelay(url, guarded, (target, options) =>
+              fetchOfficialManagement(target, options, {
+                fetch: fetchWithVerifiedTls,
+                directProxy: getManagementProxy,
+              }),
+            )
           }
           try {
             return await fetchPath(guarded)
