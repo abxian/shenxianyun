@@ -12,6 +12,7 @@ export type AccessRestrictionReason =
   | SubscriptionRestrictionReason
   | 'device_limit'
   | 'bound_limit'
+  | 'credential_rejected'
 export type AccessRestriction = {
   accessCode: string
   reason: AccessRestrictionReason
@@ -30,7 +31,8 @@ export const parseAccessRestriction = (
     return value?.accessCode === accessCode &&
       (isConfirmedSubscriptionRestriction(value.reason) ||
         value.reason === 'device_limit' ||
-        value.reason === 'bound_limit')
+        value.reason === 'bound_limit' ||
+        value.reason === 'credential_rejected')
       ? value
       : null
   } catch {

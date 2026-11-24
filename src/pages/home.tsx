@@ -2132,6 +2132,16 @@ const HomePage = () => {
           }
           if (
             online &&
+            response.status === 401 &&
+            data?.message === 'device credential required'
+          ) {
+            await stopForServerLimit(
+              '设备授权已失效，请重新验证提取码',
+              'credential_rejected',
+            )
+          }
+          if (
+            online &&
             (data?.code === 'device_limit' ||
               data?.code === 'bound_limit' ||
               data?.code === 'traffic_limit')
@@ -2982,6 +2992,7 @@ const HomePage = () => {
           error.serverRejected &&
           isConfirmedSubscriptionRestriction(error.stateCode)
         ) {
+          assertAccountCurrent()
           const reason = error.stateCode
           recordAccessRestriction(currentCode, reason)
           // Existing connected clients fail closed. Never turn on a stopped VPN.
