@@ -1,17 +1,26 @@
+const subscriptionRestrictionReasons = [
+  'expired',
+  'traffic_limit',
+  'code_disabled',
+  'invalid_code',
+] as const
+
+type SubscriptionRestrictionReason =
+  (typeof subscriptionRestrictionReasons)[number]
+
 export type AccessRestrictionReason =
-  | 'expired'
-  | 'traffic_limit'
-  | 'unavailable'
+  | SubscriptionRestrictionReason
+  | 'device_limit'
+  | 'bound_limit'
 export type AccessRestriction = {
   accessCode: string
   reason: AccessRestrictionReason
 }
-export const restrictionReason = (code?: string): AccessRestrictionReason =>
-  code === 'expired'
-    ? 'expired'
-    : code === 'traffic_limit'
-      ? 'traffic_limit'
-      : 'unavailable'
+export const isConfirmedSubscriptionRestriction = (
+  code?: string,
+): code is SubscriptionRestrictionReason =>
+  subscriptionRestrictionReasons.some((reason) => reason === code)
+
 export const parseAccessRestriction = (
   raw: string | null,
   accessCode: string,
@@ -19,7 +28,9 @@ export const parseAccessRestriction = (
   try {
     const value = JSON.parse(raw || 'null') as AccessRestriction | null
     return value?.accessCode === accessCode &&
-      ['expired', 'traffic_limit', 'unavailable'].includes(value.reason)
+      (isConfirmedSubscriptionRestriction(value.reason) ||
+        value.reason === 'device_limit' ||
+        value.reason === 'bound_limit')
       ? value
       : null
   } catch {

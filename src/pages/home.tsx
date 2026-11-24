@@ -198,9 +198,9 @@ import {
 } from '@/services/update'
 import { VISIBLE_APP_NAME } from '@/services/visible-brand'
 import {
+  isConfirmedSubscriptionRestriction,
   needsSubscriptionRefresh,
   parseAccessRestriction,
-  restrictionReason,
   type AccessRestriction,
   type AccessRestrictionReason,
 } from '@/utils/access-recovery'
@@ -1754,7 +1754,10 @@ const HomePage = () => {
       )
       const data = (await response.json()) as UpdateStateResponse
       if (!response.ok || !data.ok) {
-        if (response.status === 404 || response.status === 403) {
+        if (
+          (response.status === 404 || response.status === 403) &&
+          isConfirmedSubscriptionRestriction(data.code)
+        ) {
           throw new AccessCodeStateError(
             data.message || '提取码暂不可用',
             true,
@@ -2033,10 +2036,7 @@ const HomePage = () => {
   )
 
   const stopForServerLimit = useCallback(
-    async (
-      message: string,
-      reason: AccessRestrictionReason = 'unavailable',
-    ) => {
+    async (message: string, reason: AccessRestrictionReason) => {
       if (!currentCode || activeCodeRef.current !== currentCode) return
       recordAccessRestriction(currentCode, reason)
       await patchVerge({ enable_tun_mode: false }).catch(() => undefined)
@@ -2143,7 +2143,7 @@ const HomePage = () => {
                   : data.code === 'bound_limit'
                     ? '绑定设备数量已达到套餐上限，代理已停止'
                     : '在线设备数量已达到套餐上限，代理已停止'),
-              data.code === 'traffic_limit' ? 'traffic_limit' : 'unavailable',
+              data.code,
             )
           }
           throw new Error(data?.message || '设备状态上报失败')
@@ -2977,12 +2977,12 @@ const HomePage = () => {
         setExpiredDialogOpen(false)
       } catch (error) {
         if (signal.aborted) throw error
-        if (error instanceof AccessCodeStateError && error.serverRejected) {
+        if (
+          error instanceof AccessCodeStateError &&
+          error.serverRejected &&
+          isConfirmedSubscriptionRestriction(error.stateCode)
+        ) {
           const reason = error.stateCode
-            ? restrictionReason(error.stateCode)
-            : expiresAt && Date.now() > parseExpireTime(expiresAt)
-              ? 'expired'
-              : 'unavailable'
           recordAccessRestriction(currentCode, reason)
           // Existing connected clients fail closed. Never turn on a stopped VPN.
           if (running) {
@@ -3591,7 +3591,14 @@ const HomePage = () => {
       // 只有「提取码」导入的配置才做有效期校验;一键导入官网订阅 / 手动导入的
       // Clash 配置(无提取码)直接允许启动——服务端已用签名订阅 URL 控制有效性,
       // 不再强制客户端必须输入提取码,否则一键导入的用户会被卡住无法启动。
-      if (currentCode) {
+      // Refresh before connecting only when a locally remembered restriction
+      // needs to be cleared. A valid installed profile can start immediately.
+      if (
+        currentCode &&
+        (codeExpired ||
+          restrictionRef.current?.accessCode === currentCode ||
+          onExpiredProfile())
+      ) {
         setStatus('正在检查提取码有效期...')
         try {
           const state = await withRequestDeadline(
@@ -3658,14 +3665,16 @@ const HomePage = () => {
           }
           clearAccessRestriction(currentCode)
         } catch (error) {
-          if (error instanceof AccessCodeStateError && error.serverRejected) {
+          if (
+            error instanceof AccessCodeStateError &&
+            error.serverRejected &&
+            isConfirmedSubscriptionRestriction(error.stateCode)
+          ) {
             const reason = error.stateCode
-              ? restrictionReason(error.stateCode)
-              : codeExpired
-                ? 'expired'
-                : 'unavailable'
             recordAccessRestriction(currentCode, reason)
-            setExpiredDialogOpen(reason !== 'unavailable')
+            setExpiredDialogOpen(
+              reason === 'expired' || reason === 'traffic_limit',
+            )
             setStatus(error.message)
             return
           }
@@ -3709,6 +3718,7 @@ const HomePage = () => {
       }
       await invalidateProxyState()
       await refreshAll()
+      if (currentCode) subscriptionMonitorRef.current?.wake()
       sendClientPresence(true).catch(() => undefined)
     } catch (error) {
       if (!running) {

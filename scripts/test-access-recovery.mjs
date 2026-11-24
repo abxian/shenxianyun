@@ -7,9 +7,9 @@ import ts from 'typescript'
 import { assertRequestActive } from '../src/services/http-request-deadline.ts'
 import { createSubscriptionMonitor } from '../src/services/subscription-monitor.ts'
 import {
+  isConfirmedSubscriptionRestriction,
   needsSubscriptionRefresh,
   parseAccessRestriction,
-  restrictionReason,
 } from '../src/utils/access-recovery.ts'
 
 // Exercise the real Home business callback with isolated IO ports, rather than
@@ -86,7 +86,7 @@ const ports = () => {
     proxyUrlRef: { current: null },
     AccessCodeStateError,
     assertRequestActive,
-    restrictionReason,
+    isConfirmedSubscriptionRestriction,
     needsSubscriptionRefresh,
     parseExpireTime: (value) => Date.parse(value.replace(' ', 'T')),
     updateState: async () => ({
@@ -394,4 +394,35 @@ test('an account switch during an apply cannot consume its predecessor revision'
   assert.equal(p.storage.get('version'), '10')
   assert.equal(JSON.parse(p.storage.get('revision')).revision, 'old')
   assert.ok(!p.events.includes('clear'))
+})
+
+test('only an explicit account rejection can interrupt a running connection', () => {
+  for (const code of ['unavailable', undefined, 'upstream_timeout']) {
+    assert.equal(isConfirmedSubscriptionRestriction(code), false)
+  }
+  for (const code of [
+    'expired',
+    'traffic_limit',
+    'code_disabled',
+    'invalid_code',
+  ]) {
+    assert.equal(isConfirmedSubscriptionRestriction(code), true)
+  }
+})
+
+test('temporary server error does not stop the running connection', async () => {
+  const mock = ports()
+  mock.running = true
+  mock.updateState = async () => {
+    throw new AccessCodeStateError(
+      'temporary source error',
+      true,
+      'unavailable',
+    )
+  }
+  await assert.rejects(
+    createCheck(mock)(new AbortController().signal),
+    /temporary source error/,
+  )
+  assert.equal(mock.restrictionRef.current, null)
 })
