@@ -9,6 +9,7 @@ import {
   accountExpiryLabel,
   homeWorkspaceVisible,
   isLocalSettingsCommand,
+  isOtherSubscriptionCommand,
 } from '../src/utils/local-workspace.ts'
 const text = readFileSync(
   new URL('../src/pages/home.tsx', import.meta.url),
@@ -53,6 +54,7 @@ function commandPorts() {
     busy: false,
     manualBusy: false,
     isLocalSettingsCommand,
+    isOtherSubscriptionCommand,
     refreshApplyInFlightRef: { current: false },
     setLocalWorkspace: (v) => events.push(['workspace', v]),
     setAdvancedOpen: (v) => events.push(['advanced', v]),
@@ -88,10 +90,21 @@ test('setting waits during an owned configuration write', async () => {
   assert.ok(!p.events.some((e) => e[0] === 'workspace'))
   assert.match(p.events[0][1], /请稍后/)
 })
+test('other opens third-party import on an active connection without server or core access', async () => {
+  const p = commandPorts()
+  p.code = ' OtHeR '
+  p.running = true
+  p.openOtherImport = () => p.events.push(['other', true])
+  await actual('importByCode', p)(true)
+  assert.deepEqual(p.events, [['other', true]])
+})
 test('reserved command is exact, ordinary codes and URLs stay ordinary', () => {
   assert.ok(isLocalSettingsCommand('SETTING'))
   assert.ok(!isLocalSettingsCommand('setting123'))
   assert.ok(!isLocalSettingsCommand('https://setting'))
+  assert.ok(isOtherSubscriptionCommand(' OTHER '))
+  assert.ok(!isOtherSubscriptionCommand('other123'))
+  assert.ok(!isOtherSubscriptionCommand('https://other'))
   assert.ok(homeWorkspaceVisible(true, false, false))
   assert.ok(!homeWorkspaceVisible(false, false, false))
   assert.ok(homeWorkspaceVisible(false, true, true))

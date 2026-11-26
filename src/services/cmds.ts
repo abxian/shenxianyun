@@ -63,10 +63,15 @@ export async function saveProfileFile(
   })
 }
 
-export async function importProfile(url: string, option?: IProfileOption) {
-  return invoke<void>('import_profile', {
+export async function importProfile(
+  url: string,
+  option?: IProfileOption,
+  external = false,
+) {
+  return invoke<string>('import_profile', {
     url,
     option: option || { with_proxy: true },
+    external,
   })
 }
 

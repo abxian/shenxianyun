@@ -137,7 +137,7 @@ impl IProfiles {
     /// append new item
     /// if the file_data is some
     /// then should save the data to file
-    pub async fn append_item(&mut self, item: &mut PrfItem) -> Result<()> {
+    pub async fn append_item(&mut self, item: &mut PrfItem, select_if_empty: bool) -> Result<()> {
         let uid = &item.uid;
         if uid.is_none() {
             bail!("the uid should not be null");
@@ -161,7 +161,7 @@ impl IProfiles {
                 .with_context(|| format!("failed to write to file \"{file}\""))?;
         }
 
-        if self.current.is_none() && (item.itype == Some("remote".into()) || item.itype == Some("local".into())) {
+        if select_if_empty && self.current.is_none() && matches!(item.itype.as_deref(), Some("remote" | "local")) {
             self.current = uid.to_owned();
         }
 
@@ -526,10 +526,14 @@ pub async fn profiles_append_item_with_filedata_safe(item: &PrfItem, file_data: 
 }
 
 pub async fn profiles_append_item_safe(item: &mut PrfItem) -> Result<()> {
+    profiles_append_item(item, true).await
+}
+
+pub async fn profiles_append_item(item: &mut PrfItem, select_if_empty: bool) -> Result<()> {
     Config::profiles()
         .await
         .with_data_modify(|mut profiles| async move {
-            profiles.append_item(item).await?;
+            profiles.append_item(item, select_if_empty).await?;
             Ok((profiles, ()))
         })
         .await

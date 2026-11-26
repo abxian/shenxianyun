@@ -2,6 +2,9 @@
 export const isLocalSettingsCommand = (value: string) =>
   value.trim().toLowerCase() === 'setting'
 
+export const isOtherSubscriptionCommand = (value: string) =>
+  value.trim().toLowerCase() === 'other'
+
 export const homeWorkspaceVisible = (
   localWorkspace: boolean,
   running: boolean,

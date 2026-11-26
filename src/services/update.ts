@@ -204,6 +204,23 @@ export const releaseUrlForVersion = (version?: string | null) => {
     : `${SHENXIANYUN_RELEASES_URL}/latest`
 }
 
+export const availableInstallerUrl = async (value?: string | null) => {
+  if (!value) return null
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'https:' || url.username || url.password) return null
+    const response = await fetchWithVerifiedTls(url.href, {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(2500),
+    })
+    if (response.ok && Number(response.headers.get('Content-Length')) > 0)
+      return url.href
+  } catch {
+    // The versioned GitHub release remains an independent download source.
+  }
+  return null
+}
+
 /** macOS 使用对应架构的正式 DMG，先确认镜像可访问。 */
 export const macosDufsDownloadUrl = async (arch?: string | null) => {
   const file =
@@ -224,19 +241,15 @@ export const macosDufsDownloadUrl = async (arch?: string | null) => {
   ]
   for (const base of bases) {
     if (!base?.startsWith('https://')) continue
-    const url = `${base}/sxy/${encodeURIComponent(file)}`
-    try {
-      const response = await fetchWithVerifiedTls(url, {
-        method: 'HEAD',
-        signal: AbortSignal.timeout(2500),
-      })
-      if (response.ok && Number(response.headers.get('Content-Length')) > 0)
-        return url
-    } catch {
-      // Try the next mirror.
-    }
+    const url = await availableInstallerUrl(
+      `${base}/sxy/${encodeURIComponent(file)}`,
+    )
+    if (url) return url
   }
-  return null
+  const replacement = (await refreshEndpoints(true))?.download_base
+  return replacement && !bases.includes(replacement)
+    ? availableInstallerUrl(`${replacement}/sxy/${encodeURIComponent(file)}`)
+    : null
 }
 
 export const cancelAppUpdateDownload = () =>

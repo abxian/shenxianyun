@@ -152,3 +152,29 @@ test('a later authenticated manifest can move an existing device to a third doma
     `${future}/managed-sub/synthetic-token`,
   )
 })
+
+test('a running client rediscovers an unknown replacement before the cache expires', async () => {
+  const future = 'https://replacement.example'
+  let published = manifest()
+  const api = resolver(
+    async (url) => {
+      if (url.startsWith(download)) throw new Error('download domain offline')
+      if (url.startsWith('https://raw.githubusercontent.com/'))
+        return Response.json(published)
+      if (url.startsWith(future)) return healthy()
+      throw new Error('API domain offline')
+    },
+    new Map(),
+    () => 1000,
+  )
+  await api.refreshEndpoints()
+  api.setActiveApiBase(alternate)
+  published = { ...manifest(future), download_base: future }
+
+  assert.equal(await api.rotateApiBase(), future)
+  assert.equal(api.getEndpoints().download_base, future)
+  assert.equal(
+    api.routeManagedRequest(`${alternate}/managed-sub/test-device`),
+    `${future}/managed-sub/test-device`,
+  )
+})

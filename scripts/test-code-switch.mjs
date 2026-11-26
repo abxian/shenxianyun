@@ -19,7 +19,11 @@ function actual(name, ports) {
   let arrow
   function visit(node) {
     if (ts.isVariableDeclaration(node) && node.name.getText(tree) === name)
-      arrow = node.initializer.arguments[0].getText(tree)
+      arrow = (
+        ts.isCallExpression(node.initializer)
+          ? node.initializer.arguments[0]
+          : node.initializer
+      ).getText(tree)
     ts.forEachChild(node, visit)
   }
   visit(tree)
@@ -72,7 +76,7 @@ function setup(overrides = {}) {
     sendClientPresence: async (value) => assert.equal(value, false),
     setExpiredDialogOpen: (value) => assert.equal(value, false),
     setCode: (value) => assert.equal(value, ''),
-    setCodeImportPhase: (value) => assert.equal(value, 'input'),
+    setCodeImportPhase: (value) => events.push(['phase', value]),
     setCodeImportMessage: (value) => assert.equal(value, ''),
     setCodeDialogOpen: (value) => {
       state.dialog = value
@@ -82,59 +86,16 @@ function setup(overrides = {}) {
   }
   return { p, events, state, run: actual('openCodeImport', p) }
 }
-test('live connection releases system proxy and TUN before stopping and opening code input', async () => {
+test('opening code input preserves an existing connection and only opens the dialog', () => {
   const t = setup()
-  await t.run()
-  assert.deepEqual(t.events, [
-    'abort-old-read',
-    ['disable', { enable_system_proxy: false, enable_tun_mode: false }],
-    'stop',
-    'open',
-  ])
-  assert.equal(t.p.proxyUrlRef.current, '')
-  assert.equal(t.p.previousRunningRef.current, false)
+  t.run()
+  assert.deepEqual(t.events, [['phase', 'input'], 'open'])
+  assert.equal(t.p.proxyUrlRef.current, 'http://127.0.0.1:7897')
+  assert.equal(t.p.previousRunningRef.current, true)
   assert.equal(t.p.codeEntryActiveRef.current, true)
-  assert.equal(t.p.backgroundBusyRef.current, false)
   assert.equal(t.state.busy, false)
 })
-test('dialog cannot open while native stop is pending', async () => {
-  let finish
-  const t = setup({
-    stopCore: () =>
-      new Promise((resolve) => {
-        finish = resolve
-      }),
-  })
-  const operation = t.run()
-  await Promise.resolve()
-  await Promise.resolve()
-  assert.equal(t.state.busy, true)
-  assert.equal(t.state.dialog, false)
-  assert.equal(t.p.codeEntryActiveRef.current, true)
-  finish()
-  await operation
-  assert.equal(t.state.dialog, true)
-})
-test('proxy or core stop failure gives a retryable error without starting validation or reconnecting', async () => {
-  for (const name of ['patchVergeConfig', 'stopCore']) {
-    const t = setup({
-      [name]: async () => {
-        throw Error('native failure')
-      },
-    })
-    await t.run()
-    assert.equal(t.state.dialog, false)
-    assert.match(t.state.status, /未能停止/)
-    assert.equal(t.state.busy, false)
-    assert.equal(t.p.backgroundBusyRef.current, false)
-    assert.equal(t.p.codeEntryActiveRef.current, false)
-  }
-})
-test('already stopped code entry does not touch native connectivity', async () => {
-  const t = setup({ running: false })
-  await t.run()
-  assert.deepEqual(t.events, ['abort-old-read', 'open'])
-})
+
 test('an in-flight config save retains ownership and cannot be interrupted by code entry', async () => {
   for (const key of [
     'busy',
@@ -149,23 +110,38 @@ test('an in-flight config save retains ownership and cannot be interrupted by co
     assert.match(t.state.status, /配置操作/)
   }
 })
-test('import boundary refuses a connection restarted externally while dialog was open', async () => {
-  for (const [running, systemProxyConfigOn] of [
-    [true, false],
-    [false, true],
-  ]) {
-    const messages = []
-    await actual('importByCode', {
-      isLocalSettingsCommand: () => false,
-      code: 'example',
-      running,
-      systemProxyConfigOn,
-      setCodeImportPhase: (p) => assert.equal(p, 'input'),
-      setCodeImportMessage: (m) => messages.push(m),
-    })()
-    assert.deepEqual(messages, ['请先停止代理，再切换提取码'])
-  }
+test('a submitted managed code waits for proxy and core shutdown before validating', async () => {
+  let finish
+  const t = setup({
+    code: '123456',
+    tunOn: true,
+    systemProxyOn: true,
+    isOtherSubscriptionCommand: () => false,
+    isLocalSettingsCommand: () => false,
+    setCodeImportMessage: () => {},
+    stopCore: () =>
+      new Promise((resolve) => {
+        finish = resolve
+      }),
+    activateCode: async () => {
+      t.events.push('validate')
+      return { activate: () => {}, commit: async () => {}, data: {} }
+    },
+    startImportedProfile: async () => {},
+    startupRefreshCompletedRef: { current: false },
+    STARTUP_REFRESH_SESSION_KEY: 'test',
+    isSwitchingCode: false,
+  })
+  const operation = actual('importByCode', t.p)()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(t.state.busy, true)
+  assert.ok(!t.events.includes('validate'))
+  finish()
+  await operation
+  assert.ok(t.events.includes('validate'))
 })
+
 test('all three user switch controls invoke the same guarded entry', () => {
   const matches = []
   function visit(node) {

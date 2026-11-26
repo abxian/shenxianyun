@@ -34,12 +34,20 @@ function actualArrow(source, name, ports) {
   return new Function('ports', `with(ports){${js}; return callback}`)(ports)
 }
 
+function macDownload(service, ports) {
+  return actualArrow(service, 'macosDufsDownloadUrl', {
+    refreshEndpoints: async () => null,
+    ...ports,
+    availableInstallerUrl: actualArrow(service, 'availableInstallerUrl', ports),
+  })
+}
+
 test('Mac Home update downloads the NAS DMG for each architecture without installing', async () => {
   const [home, service] = await Promise.all([
     read('src/pages/home.tsx'),
     read('src/services/update.ts'),
   ])
-  const downloadUrl = actualArrow(service, 'macosDufsDownloadUrl', {
+  const downloadUrl = macDownload(service, {
     getEndpoints: () => ({ download_base: 'https://sxy.52nm.de:5443' }),
     ALTERNATE_DOWNLOAD_BASE: 'https://sxy.52nm.de:5443',
     LEGACY_DOWNLOAD_BASE: 'https://sxy.sxnn.de:5443',
@@ -79,7 +87,7 @@ test('unknown or unavailable Mac architecture falls back to the matching release
     read('src/pages/home.tsx'),
     read('src/services/update.ts'),
   ])
-  const downloadUrl = actualArrow(service, 'macosDufsDownloadUrl', {
+  const downloadUrl = macDownload(service, {
     getEndpoints: () => ({ download_base: 'https://sxy.52nm.de:5443' }),
     ALTERNATE_DOWNLOAD_BASE: 'https://sxy.52nm.de:5443',
     LEGACY_DOWNLOAD_BASE: 'https://sxy.sxnn.de:5443',
@@ -123,7 +131,7 @@ test('unreachable Mac mirrors fall back to the matching release', async () => {
   const probes = []
   const opened = []
   const fallback = 'https://github.com/abxian/shenxianyun/releases/tag/v2.5.58'
-  const downloadUrl = actualArrow(service, 'macosDufsDownloadUrl', {
+  const downloadUrl = macDownload(service, {
     getEndpoints: () => ({ download_base: 'https://sxy.sxnn.de:5443' }),
     ALTERNATE_DOWNLOAD_BASE: 'https://sxy.52nm.de:5443',
     LEGACY_DOWNLOAD_BASE: 'https://sxy.sxnn.de:5443',
@@ -143,6 +151,29 @@ test('unreachable Mac mirrors fall back to the matching release', async () => {
   })()
   assert.deepEqual(probes, ['sxy.sxnn.de', 'sxy.52nm.de'])
   assert.deepEqual(opened, [fallback])
+})
+
+test('a stale download cache rediscovers the new mirror after both known hosts fail', async () => {
+  const service = await read('src/services/update.ts')
+  const future = 'https://downloads.example'
+  const downloadUrl = macDownload(service, {
+    getEndpoints: () => ({ download_base: 'https://sxy.52nm.de:5443' }),
+    ALTERNATE_DOWNLOAD_BASE: 'https://sxy.52nm.de:5443',
+    LEGACY_DOWNLOAD_BASE: 'https://sxy.sxnn.de:5443',
+    refreshEndpoints: async (force) => {
+      assert.equal(force, true)
+      return { download_base: future }
+    },
+    fetchWithVerifiedTls: async (url) =>
+      new Response(null, {
+        status: url.startsWith(future) ? 200 : 503,
+        headers: { 'Content-Length': '100' },
+      }),
+  })
+  assert.equal(
+    await downloadUrl('aarch64'),
+    `${future}/sxy/${encodeURIComponent('神仙云.dmg')}`,
+  )
 })
 
 test('configured metadata endpoints keep both HTTPS Dufs sources', async () => {

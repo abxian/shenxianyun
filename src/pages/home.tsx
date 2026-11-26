@@ -194,6 +194,7 @@ import {
 import {
   downloadAndInstallWithFallback,
   cancelAppUpdateDownload,
+  availableInstallerUrl,
   macosDufsDownloadUrl,
   releaseUrlForVersion,
 } from '@/services/update'
@@ -212,6 +213,7 @@ import {
   accountExpiryLabel,
   homeWorkspaceVisible,
   isLocalSettingsCommand,
+  isOtherSubscriptionCommand,
 } from '@/utils/local-workspace'
 import { prepareSubscriptionContent } from '@/utils/subscription-content'
 import { version as desktopBuildVersion } from '@root/package.json'
@@ -925,6 +927,8 @@ const HomePage = () => {
   // 手动配置管理（应对 web 断网无法导入订阅时，自行切换/导入/编辑本地配置）
   const [profileManagerOpen, setProfileManagerOpen] = useState(false)
   const [manualImportUrl, setManualImportUrl] = useState('')
+  const [otherImportOpen, setOtherImportOpen] = useState(false)
+  const [otherImportError, setOtherImportError] = useState('')
   const [manualBusy, setManualBusy] = useState(false)
   const [editorState, setEditorState] = useState<{
     uid: string
@@ -1826,6 +1830,14 @@ const HomePage = () => {
       })
     }
   }, [apiFetch])
+
+  const openDesktopInstaller = async (url?: string) => {
+    const version = desktopUpdate?.latest_version
+    setDesktopUpdate(null)
+    await openWebUrl(
+      (await availableInstallerUrl(url)) ?? releaseUrlForVersion(version),
+    )
+  }
 
   const updateCurrentProfileKeepingRules = useCallback(
     async (suppressFailureNotice = false) => {
@@ -3236,63 +3248,64 @@ const HomePage = () => {
     )
   }, [expiredProfileUid, profiles?.items])
 
-  const manualImportByUrl = useLockFn(async () => {
-    if (running) {
-      setStatus('请先停止代理，再导入或切换配置')
-      return
-    }
-    if (busy || manualBusy || refreshApplyInFlightRef.current) {
-      setStatus('正在完成配置操作，请稍后重试')
-      return
-    }
-    autoRefreshControllerRef.current?.abort()
-    const url = manualImportUrl.trim()
-    if (!url) {
-      setStatus('请输入订阅链接')
-      return
-    }
-    backgroundBusyRef.current = true
-    setManualBusy(true)
-    setStatus('正在导入订阅...')
-    const previousActiveCode = activeCodeRef.current
-    let selected = false
-    try {
-      const before = await getProfiles()
-      const previousIds = new Set(
-        (before.items || [])
-          .map((item) => item.uid)
-          .filter((uid): uid is string => Boolean(uid)),
-      )
-      // 不开启周期性自动更新，避免无谓重下整个配置。
-      await importProfile(url, { with_proxy: true, allow_auto_update: false })
-      await ensureDomesticApiDirect().catch(() => undefined)
-      const list = await getProfiles()
-      const newest = (list.items || [])
-        .filter((item) => item.uid && !previousIds.has(item.uid))
-        .slice(-1)[0]
-      if (newest?.uid) {
-        activeCodeRef.current = ''
-        const switched = await patchProfilesConfig({ current: newest.uid })
-        if (!switched) {
-          await deleteProfile(newest.uid).catch(() => undefined)
-          throw new Error('订阅内容验证失败，已保留原配置')
-        }
-      } else {
-        throw new Error('无法定位新导入的订阅')
+  const manualImportByUrl = useLockFn(
+    async (select = true, external = false) => {
+      if (select && (running || (external && systemProxyConfigOn))) {
+        setStatus('请先停止代理，再导入或切换配置')
+        return
       }
-      selected = true
-      setManualImportUrl('')
-      await mutateProfiles()
-      await refreshAll()
-      setStatus('订阅已导入并切换')
-    } catch {
-      if (!selected) activeCodeRef.current = previousActiveCode
-      setStatus('订阅导入失败，请检查链接后重试')
-    } finally {
-      backgroundBusyRef.current = false
-      setManualBusy(false)
-    }
-  })
+      if (busy || manualBusy || refreshApplyInFlightRef.current) {
+        setStatus('正在完成配置操作，请稍后重试')
+        return
+      }
+      autoRefreshControllerRef.current?.abort()
+      const url = manualImportUrl.trim()
+      if (!url) {
+        setStatus('请输入订阅链接')
+        return
+      }
+      backgroundBusyRef.current = true
+      setManualBusy(true)
+      setOtherImportError('')
+      setStatus('正在导入订阅...')
+      const previousActiveCode = activeCodeRef.current
+      let selected = false
+      try {
+        // 不开启周期性自动更新，避免无谓重下整个配置。
+        const uid = await importProfile(
+          url,
+          { with_proxy: true, allow_auto_update: false },
+          external,
+        )
+        if (select) {
+          await ensureDomesticApiDirect().catch(() => undefined)
+          activeCodeRef.current = ''
+          try {
+            if (!(await patchProfilesConfig({ current: uid }))) {
+              throw new Error('订阅内容验证失败')
+            }
+          } catch (error) {
+            await deleteProfile(uid).catch(() => undefined)
+            throw error
+          }
+          selected = true
+        }
+        setManualImportUrl('')
+        if (external) setOtherImportOpen(false)
+        await Promise.allSettled([mutateProfiles(), refreshAll()])
+        setStatus(select ? '订阅已导入并切换' : '订阅已保存，可在配置列表切换')
+      } catch {
+        if (!selected) activeCodeRef.current = previousActiveCode
+        const message =
+          '未能导入，请检查订阅链接、网络或配置格式。原配置已保留。'
+        if (external) setOtherImportError(message)
+        setStatus(message)
+      } finally {
+        backgroundBusyRef.current = false
+        setManualBusy(false)
+      }
+    },
+  )
 
   const manualImportFile = useLockFn(async (file: File, content: string) => {
     if (running) {
@@ -3513,7 +3526,7 @@ const HomePage = () => {
       .catch(() => false)
   }, [])
 
-  const openCodeImport = useLockFn(async () => {
+  const openCodeImport = () => {
     if (
       busy ||
       manualBusy ||
@@ -3523,51 +3536,14 @@ const HomePage = () => {
       setStatus('正在完成配置操作，请稍后再切换提取码')
       return
     }
-    // Own the transition before canceling old reads; pause disconnect/focus refresh.
     codeEntryActiveRef.current = true
-    backgroundBusyRef.current = true
-    autoRefreshControllerRef.current?.abort()
-    setBusy(true)
     setStatus('')
-    try {
-      if (running || systemProxyConfigOn) {
-        // Await native writes, without an optimistic toggle or a write timeout.
-        await patchVergeConfig({
-          enable_system_proxy: false,
-          enable_tun_mode: false,
-        })
-        mutateVerge(
-          (previous) =>
-            previous
-              ? {
-                  ...previous,
-                  enable_system_proxy: false,
-                  enable_tun_mode: false,
-                }
-              : previous,
-          false,
-        )
-        await stopCore()
-        setConnectionReady(false)
-        proxyUrlRef.current = ''
-        previousRunningRef.current = false
-        void invalidateProxyState().catch(() => undefined)
-        void refreshAll().catch(() => undefined)
-        void sendClientPresence(false).catch(() => undefined)
-      }
-      setExpiredDialogOpen(false)
-      setCode('')
-      setCodeImportPhase('input')
-      setCodeImportMessage('')
-      setCodeDialogOpen(true)
-    } catch {
-      codeEntryActiveRef.current = false
-      setStatus('未能停止当前连接，请先点击停止，再重试切换提取码')
-    } finally {
-      backgroundBusyRef.current = false
-      setBusy(false)
-    }
-  })
+    setExpiredDialogOpen(false)
+    setCode('')
+    setCodeImportPhase('input')
+    setCodeImportMessage('')
+    setCodeDialogOpen(true)
+  }
 
   const togglePower = useLockFn(async () => {
     if (manualBusy) {
@@ -4070,7 +4046,19 @@ const HomePage = () => {
     }
   }, [importManagedRequest])
 
+  const openOtherImport = () => {
+    setCodeDialogOpen(false)
+    setCode('')
+    setManualImportUrl('')
+    setOtherImportError('')
+    setOtherImportOpen(true)
+  }
+
   const importByCode = useLockFn(async (startAfterImport = false) => {
+    if (isOtherSubscriptionCommand(code)) {
+      openOtherImport()
+      return
+    }
     if (isLocalSettingsCommand(code)) {
       if (busy || manualBusy || refreshApplyInFlightRef.current) {
         setCodeImportMessage('正在完成配置操作，请稍后再试')
@@ -4083,11 +4071,6 @@ const HomePage = () => {
       setCodeImportPhase('input')
       setCodeImportMessage('')
       setStatus('已进入本机高级模式，可先管理配置，再点击启动')
-      return
-    }
-    if (running || systemProxyConfigOn) {
-      setCodeImportPhase('input')
-      setCodeImportMessage('请先停止代理，再切换提取码')
       return
     }
     if (refreshApplyInFlightRef.current) {
@@ -4117,6 +4100,31 @@ const HomePage = () => {
     }
     updatePhase('checking')
     try {
+      if (connectivity.wasRunning || connectivity.systemProxyEnabled) {
+        // Await native writes, without an optimistic toggle or a write timeout.
+        await patchVergeConfig({
+          enable_system_proxy: false,
+          enable_tun_mode: false,
+        })
+        mutateVerge(
+          (previous) =>
+            previous
+              ? {
+                  ...previous,
+                  enable_system_proxy: false,
+                  enable_tun_mode: false,
+                }
+              : previous,
+          false,
+        )
+        await stopCore()
+        setConnectionReady(false)
+        proxyUrlRef.current = ''
+        previousRunningRef.current = false
+        void invalidateProxyState().catch(() => undefined)
+        void refreshAll().catch(() => undefined)
+        void sendClientPresence(false).catch(() => undefined)
+      }
       transaction = await activateCode(value, 3, updatePhase)
       updatePhase('starting')
       await startImportedProfile(transaction.activate)
@@ -4148,6 +4156,12 @@ const HomePage = () => {
       let recoveryFailure = ''
       if (transaction) {
         recoveryFailure = await rollbackManagedImport(transaction, connectivity)
+      } else if (connectivity.wasRunning || connectivity.systemProxyEnabled) {
+        try {
+          await restoreConnectivityAfterImportFailure(connectivity)
+        } catch {
+          recoveryFailure = '请在首页重新启动连接'
+        }
       }
       const failedPhase = phase
       if (startAfterImport)
@@ -6531,11 +6545,11 @@ const HomePage = () => {
               {DESKTOP_PLATFORM === 'linux' && desktopUpdate?.linux_deb_url ? (
                 <Button
                   variant="outlined"
-                  onClick={() => {
-                    const url = desktopUpdate?.linux_deb_url
-                    setDesktopUpdate(null)
-                    if (url) openWebUrl(url).catch(() => undefined)
-                  }}
+                  onClick={() =>
+                    void openDesktopInstaller(
+                      desktopUpdate?.linux_deb_url,
+                    ).catch(() => undefined)
+                  }
                   sx={{ minWidth: 96, fontWeight: 800 }}
                 >
                   下载 DEB
@@ -6544,11 +6558,11 @@ const HomePage = () => {
               {DESKTOP_PLATFORM === 'linux' && desktopUpdate?.linux_rpm_url ? (
                 <Button
                   variant="outlined"
-                  onClick={() => {
-                    const url = desktopUpdate?.linux_rpm_url
-                    setDesktopUpdate(null)
-                    if (url) openWebUrl(url).catch(() => undefined)
-                  }}
+                  onClick={() =>
+                    void openDesktopInstaller(
+                      desktopUpdate?.linux_rpm_url,
+                    ).catch(() => undefined)
+                  }
                   sx={{ minWidth: 96, fontWeight: 800 }}
                 >
                   下载 RPM
@@ -6556,11 +6570,11 @@ const HomePage = () => {
               ) : null}
               <Button
                 variant="contained"
-                onClick={() => {
-                  const url = desktopUpdate?.download_url
-                  setDesktopUpdate(null)
-                  if (url) openWebUrl(url).catch(() => undefined)
-                }}
+                onClick={() =>
+                  void openDesktopInstaller(desktopUpdate?.download_url).catch(
+                    () => undefined,
+                  )
+                }
                 sx={{
                   minWidth: 112,
                   background: 'linear-gradient(135deg, #5f7bf0, #4159e0)',
@@ -6642,6 +6656,9 @@ const HomePage = () => {
                       {codeImportMessage}
                     </Alert>
                   )}
+                  <Button disabled={busy} onClick={openOtherImport}>
+                    导入其他订阅
+                  </Button>
                 </Stack>
               ) : codeImportPhase === 'error' ? (
                 <Stack spacing={1.5} sx={{ alignItems: 'center', pt: 0.5 }}>
@@ -6868,6 +6885,69 @@ const HomePage = () => {
             </DialogActions>
           </Dialog>
 
+          <Dialog
+            open={otherImportOpen}
+            onClose={() => {
+              if (!manualBusy) setOtherImportOpen(false)
+            }}
+            fullWidth
+            maxWidth="xs"
+            slotProps={{ paper: { sx: glassDialogPaperSx } }}
+          >
+            <DialogTitle>导入其他订阅</DialogTitle>
+            <DialogContent>
+              <Stack spacing={1.5} sx={{ pt: 1 }}>
+                <TextField
+                  autoFocus
+                  fullWidth
+                  label="HTTPS 订阅链接"
+                  placeholder="粘贴 Clash / Mihomo 订阅链接"
+                  value={manualImportUrl}
+                  onChange={(event) => {
+                    setManualImportUrl(event.target.value)
+                    setOtherImportError('')
+                  }}
+                  disabled={manualBusy}
+                  sx={fieldSx}
+                />
+                {otherImportError && (
+                  <Alert severity="warning">{otherImportError}</Alert>
+                )}
+                {(running || systemProxyConfigOn) && (
+                  <Typography variant="body2">
+                    当前连接可继续使用。若要立即切换，请先断开。
+                  </Typography>
+                )}
+              </Stack>
+            </DialogContent>
+            <DialogActions>
+              <Button
+                disabled={manualBusy}
+                onClick={() => setOtherImportOpen(false)}
+              >
+                取消
+              </Button>
+              <Button
+                disabled={manualBusy || !manualImportUrl.trim()}
+                onClick={() => void manualImportByUrl(false, true)}
+              >
+                保存
+              </Button>
+              <Button
+                variant="contained"
+                disabled={
+                  manualBusy ||
+                  !manualImportUrl.trim() ||
+                  running ||
+                  systemProxyConfigOn
+                }
+                onClick={() => void manualImportByUrl(true, true)}
+              >
+                保存并使用
+              </Button>
+            </DialogActions>
+          </Dialog>
+
           {/* 手动配置管理：导入/切换/编辑/删除本地或第三方 Clash 订阅 */}
           <Dialog
             open={profileManagerOpen}
@@ -6907,7 +6987,7 @@ const HomePage = () => {
                   <Button
                     variant="contained"
                     disabled={manualBusy || !manualImportUrl.trim()}
-                    onClick={manualImportByUrl}
+                    onClick={() => void manualImportByUrl()}
                     sx={{
                       minWidth: 84,
                       background: 'linear-gradient(135deg, #5f7bf0, #4159e0)',
@@ -6998,9 +7078,11 @@ const HomePage = () => {
                                   color: 'rgba(36,46,66,.55)',
                                 }}
                               >
-                                {item.type === 'remote'
-                                  ? '远程订阅'
-                                  : '本地配置'}
+                                {item.uid === codeProfileUid
+                                  ? '神仙云'
+                                  : item.type === 'remote'
+                                    ? '第三方订阅'
+                                    : '本地配置'}
                               </Typography>
                             </Box>
                             <Button

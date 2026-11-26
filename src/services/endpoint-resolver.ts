@@ -218,9 +218,10 @@ let discoveredAt: number | undefined
 let discoveryInFlight: Promise<Endpoints | null> | undefined
 
 /** 后台周期刷新地址，发现失败时继续使用最近有效清单。 */
-export const refreshEndpoints = (): Promise<Endpoints | null> => {
+export const refreshEndpoints = (force = false): Promise<Endpoints | null> => {
   if (discoveryInFlight) return discoveryInFlight
   if (
+    !force &&
     discoveredAt !== undefined &&
     Date.now() - discoveredAt < DISCOVERY_INTERVAL_MS
   )
@@ -337,10 +338,18 @@ export const setActiveApiBase = (base: string): void => {
 /** 请求失败时调用：把当前 active 基址作废并顺延到下一个候选，返回新基址。 */
 export const rotateApiBase = async (proxyUrl?: string): Promise<string> => {
   const bad = getApiBase()
-  const base = await firstReachable(
-    allApiBases().filter((candidate) => candidate !== bad),
+  const tried = new Set(allApiBases())
+  let base = await firstReachable(
+    [...tried].filter((candidate) => candidate !== bad),
     proxyUrl,
   )
+  if (!base) {
+    await refreshEndpoints(true)
+    base = await firstReachable(
+      allApiBases().filter((candidate) => !tried.has(candidate)),
+      proxyUrl,
+    )
+  }
   if (base) {
     localStorage.setItem(ACTIVE_BASE_KEY, base)
     return base

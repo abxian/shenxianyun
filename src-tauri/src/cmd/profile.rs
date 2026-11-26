@@ -6,7 +6,8 @@ use crate::{
     config::{
         Config, IProfiles, PrfItem, PrfOption,
         profiles::{
-            profiles_delete_item_safe, profiles_patch_item_safe, profiles_reorder_safe, profiles_save_file_safe,
+            profiles_append_item, profiles_delete_item_safe, profiles_patch_item_safe, profiles_reorder_safe,
+            profiles_save_file_safe,
         },
         profiles_append_item_safe,
     },
@@ -66,22 +67,40 @@ pub async fn enhance_profiles() -> CmdResult<ValidationOutcome> {
 
 /// 导入配置文件
 #[tauri::command]
-pub async fn import_profile(url: std::string::String, option: Option<PrfOption>) -> CmdResult {
-    logging!(info, Type::Cmd, "[导入订阅] 开始导入: {}", help::mask_url(&url));
+pub async fn import_profile(
+    url: std::string::String,
+    option: Option<PrfOption>,
+    external: Option<bool>,
+) -> CmdResult<std::string::String> {
+    let external = external.unwrap_or(false);
+    let name = if external {
+        let parsed = reqwest::Url::parse(&url).map_err(|_| "订阅链接无效")?;
+        if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err("请输入有效的 HTTPS 订阅链接".into());
+        }
+        Some(parsed.host_str().ok_or("订阅链接缺少域名")?.to_owned().into())
+    } else {
+        None
+    };
+    logging!(info, Type::Cmd, "[导入订阅] 开始导入");
 
     // 直接依赖 PrfItem::from_url 自身的超时/重试逻辑，不再使用 tokio::time::timeout 包裹
-    let item = &mut match PrfItem::from_url(&url, None, None, option.as_ref()).await {
+    let item = &mut match PrfItem::from_url(&url, name.as_ref(), None, option.as_ref()).await {
         Ok(it) => {
             logging!(info, Type::Cmd, "[导入订阅] 下载完成，开始保存配置");
             it
         }
         Err(e) => {
+            if external {
+                return Err("下载订阅失败，请检查链接、网络和订阅格式".into());
+            }
             logging!(error, Type::Cmd, "[导入订阅] 下载失败: {}", e);
             return Err(profile_import_error(&e).into());
         }
     };
 
-    match profiles_append_item_safe(item).await {
+    let uid = item.uid.clone().ok_or("无法识别导入的配置")?;
+    match profiles_append_item(item, !external).await {
         Ok(_) => match profiles_save_file_safe().await {
             Ok(_) => logging!(info, Type::Cmd, "[导入订阅] 配置文件保存成功"),
             Err(e) => {
@@ -98,13 +117,9 @@ pub async fn import_profile(url: std::string::String, option: Option<PrfOption>)
         }
     }
 
-    if let Some(uid) = &item.uid {
-        logging!(info, Type::Cmd, "[导入订阅] 发送配置变更通知: {}", uid);
-        handle::Handle::notify_profile_changed(uid);
-    }
-
-    logging!(info, Type::Cmd, "[导入订阅] 导入完成: {}", help::mask_url(&url));
-    Ok(())
+    logging!(info, Type::Cmd, "[导入订阅] 导入完成: {}", uid);
+    handle::Handle::notify_profile_changed(&uid);
+    Ok(uid.into())
 }
 
 /// 调整profile的顺序
