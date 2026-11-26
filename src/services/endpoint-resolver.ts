@@ -17,32 +17,34 @@ export const PINNED_API_BASES = [
   'https://api.sxnn.de:5443', // 神仙云1 国内直连
 ]
 
-// 仅作为故障兜底参与并发检测。旧 sub.jc116.com 已失效，不再作为线路候选。
-const FALLBACK_API_BASES = ['https://sxnn.de', 'http://114.80.36.225:5010']
+export const ALTERNATE_API_BASE = 'https://sxy-api.52nm.de:5443'
+export const ALTERNATE_DOWNLOAD_BASE = 'https://sxy.52nm.de:5443'
+export const LEGACY_DOWNLOAD_BASE = 'https://sxy.sxnn.de:5443'
+const LEGACY_API_BASE = 'http://114.80.36.225:5010'
 const RETIRED_API_HOSTS = new Set(['sub.jc116.com'])
-// 内置兜底默认值（发现源全挂时用第一条写死线路）
 export const DEFAULT_API_BASE = PINNED_API_BASES[0]
 
-// 完整线路按固定优先级排列；并发检测只缩短等待时间，不改变选择优先级。
 const allApiBases = (): string[] => {
-  const merged = [...PINNED_API_BASES, ...FALLBACK_API_BASES]
-  for (const b of readCache()?.api_bases ?? []) {
-    let host = ''
-    try {
-      host = new URL(b).hostname
-    } catch {
-      // sanitize 已过滤坏地址，这里仍保持防御性处理。
-    }
-    if (b && !RETIRED_API_HOSTS.has(host) && !merged.includes(b)) merged.push(b)
-  }
-  return merged
+  const discovered = (readCache()?.api_bases ?? []).filter(
+    (base) => !RETIRED_API_HOSTS.has(new URL(base).hostname),
+  )
+  return [
+    ...new Set([
+      ...PINNED_API_BASES,
+      ...discovered.filter(
+        (base) => base.startsWith('https:') && base !== 'https://sxnn.de',
+      ),
+      ALTERNATE_API_BASE,
+      'https://sxnn.de',
+      ...discovered.filter((base) => base.startsWith('http:')),
+      LEGACY_API_BASE,
+    ]),
+  ]
 }
 
-// 发现锚点：第一个是 web 后台「保存并发布」自动上传的 endpoints.json（唯一真源，dufs），
-// 后两个是备份（GitHub 手动同步、app 动态接口）。
 const DISCOVERY_URLS = [
-  'https://sxy.sxnn.de:5443/endpoints.json',
-  'http://114.80.36.225:5011/endpoints.json',
+  `${ALTERNATE_DOWNLOAD_BASE}/endpoints.json`,
+  `${LEGACY_DOWNLOAD_BASE}/endpoints.json`,
   'https://raw.githubusercontent.com/abxian/shenxianyun-config/main/endpoints.json',
   'https://sxnn.de/api/endpoints',
 ]
@@ -61,8 +63,20 @@ export type Endpoints = {
 
 const normalizeBase = (value: unknown): string => {
   if (typeof value !== 'string') return ''
-  const v = value.trim().replace(/\/+$/, '')
-  return /^https?:\/\//.test(v) ? v : ''
+  try {
+    const url = new URL(value.trim())
+    if (
+      !['http:', 'https:'].includes(url.protocol) ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    )
+      return ''
+    return url.href.replace(/\/+$/, '')
+  } catch {
+    return ''
+  }
 }
 
 // 兜底代理：允许 http/socks5 URL；不像 base 那样去尾斜杠。
@@ -118,6 +132,26 @@ export const getApiBase = (): string => {
   return allApiBases()[0] || DEFAULT_API_BASE
 }
 
+/** Keep the saved device credential while switching between verified aliases of the same service. */
+export const routeManagedRequest = (url: string): string => {
+  if (getApiBase() !== ALTERNATE_API_BASE) return url
+  try {
+    const source = new URL(url)
+    if (
+      ![DEFAULT_API_BASE, 'https://sxnn.de'].includes(source.origin) ||
+      source.username ||
+      source.password ||
+      !/^\/(?:managed-sub\/[^/]+|api\/v2\/client\/(?:verify|state|subscription|heartbeat|offline|relay|traffic))$/.test(
+        source.pathname,
+      )
+    )
+      return url
+    return `${ALTERNATE_API_BASE}${source.pathname}${source.search}`
+  } catch {
+    return url
+  }
+}
+
 export const getEndpoints = (): Endpoints | null => readCache()
 
 /** 兜底代理（HTTP/SOCKS5）：直连+系统代理都连不上 web 时的最后一条路。无则空串。 */
@@ -142,15 +176,29 @@ const fetchDiscovery = async (url: string): Promise<Endpoints> => {
   }
 }
 
-/** 并发拉取发现源，取第一个有效响应。发现失败不阻塞内置主线路。 */
-export const refreshEndpoints = async (): Promise<Endpoints | null> => {
-  try {
-    const parsed = await Promise.any(DISCOVERY_URLS.map(fetchDiscovery))
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
-    return parsed
-  } catch {
-    return readCache()
-  }
+const DISCOVERY_INTERVAL_MS = 5 * 60_000
+let discoveredAt: number | undefined
+let discoveryInFlight: Promise<Endpoints | null> | undefined
+
+/** 后台周期刷新地址，发现失败时继续使用最近有效清单。 */
+export const refreshEndpoints = (): Promise<Endpoints | null> => {
+  if (discoveryInFlight) return discoveryInFlight
+  if (
+    discoveredAt !== undefined &&
+    Date.now() - discoveredAt < DISCOVERY_INTERVAL_MS
+  )
+    return Promise.resolve(readCache())
+  discoveryInFlight = Promise.any(DISCOVERY_URLS.map(fetchDiscovery))
+    .then((parsed) => {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
+      discoveredAt = Date.now()
+      return parsed
+    })
+    .catch(() => readCache())
+    .finally(() => {
+      discoveryInFlight = undefined
+    })
+  return discoveryInFlight
 }
 
 // 一次 GET 探测：proxyUrl 传入时经该代理（软件内核混合端口）出网，否则本机直连。
@@ -167,7 +215,9 @@ const probeOnce = async (
       signal: ctrl.signal,
       ...(proxyUrl ? { proxy: { all: proxyUrl } } : {}),
     })
-    return res.ok
+    if (!res.ok) return false
+    const data = await res.json()
+    return data?.ok === true && typeof data.latest_version_name === 'string'
   } catch {
     return false
   } finally {
@@ -200,20 +250,23 @@ const firstReachable = async (
   bases: string[],
   proxyUrl?: string,
 ): Promise<string | null> => {
-  const results = await Promise.all(
-    bases.map((base) => reachable(base, proxyUrl)),
+  const checks = bases.map(async (base) =>
+    (await reachable(base, proxyUrl)) ? base : null,
   )
-  return bases.find((_, index) => results[index]) ?? null
+  for (const check of checks) {
+    const base = await check
+    if (base) return base
+  }
+  return null
 }
 
 /** 并发探测 api_bases，按列表优先级选择可用线路。proxyUrl=内核混合端口（可选兜底）。 */
-export const pickApiBase = async (proxyUrl?: string): Promise<string> => {
+export const pickApiBase = async (
+  proxyUrl?: string,
+): Promise<string | null> => {
   const base = await firstReachable(allApiBases(), proxyUrl)
-  if (base) {
-    localStorage.setItem(ACTIVE_BASE_KEY, base)
-    return base
-  }
-  return getApiBase()
+  if (base) localStorage.setItem(ACTIVE_BASE_KEY, base)
+  return base
 }
 
 /** 当前候选线路 = 国内主线路 + 国外/内穿兜底；旧域名已排除。 */
@@ -248,36 +301,29 @@ export const rotateApiBase = async (proxyUrl?: string): Promise<string> => {
   return bad
 }
 
-/** 启动时调用一次：刷新发现源 + 探测可用基址（后台执行，不阻塞 UI）。 */
-export const initEndpointDiscovery = async (
-  proxyUrl?: string,
-): Promise<void> => {
-  // 覆盖旧版本保存的国外/内穿选择，启动瞬间即使用国内主域名。
-  localStorage.setItem(ACTIVE_BASE_KEY, DEFAULT_API_BASE)
-  // 所有候选并发检测，但结果始终按国内主域名优先选取。
-  await pickApiBase(proxyUrl)
-  await refreshEndpoints()
-  await pickApiBase(proxyUrl)
-}
-
-/** 官方域名直连列表：生成占位/规则时使用，避免客户端把自家 API/订阅域名也代理了。 */
+/** 官方域名直连列表：避免客户端把自家 API 和下载入口代理出去。 */
 export const officialDirectRules = (): string[] => {
-  const hosts = new Set<string>(['jc116.com', 'sxnn.de'])
   const cached = readCache()
-  const collect = (value?: string) => {
-    if (!value) return
-    try {
-      const host = new URL(value).hostname
-      if (host && !/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
-        // 取注册域（简单处理：保留完整主机名后缀即可满足 DOMAIN-SUFFIX）
-        hosts.add(host.split('.').slice(-2).join('.'))
-      }
-    } catch {
-      // 忽略坏值
-    }
-  }
-  for (const b of cached?.api_bases ?? []) collect(b)
-  collect(cached?.sub_base)
-  collect(cached?.download_base)
-  return [...hosts].map((h) => `DOMAIN-SUFFIX,${h},DIRECT`)
+  const hosts = [
+    ALTERNATE_API_BASE,
+    ALTERNATE_DOWNLOAD_BASE,
+    ...(cached?.api_bases ?? []),
+    cached?.sub_base,
+    cached?.download_base,
+  ].flatMap((url) => {
+    if (!url) return []
+    const host = new URL(url).hostname
+    if (
+      host === 'sxnn.de' ||
+      host.endsWith('.sxnn.de') ||
+      /^\d+(?:\.\d+){3}$/.test(host)
+    )
+      return []
+    return [`DOMAIN,${host},DIRECT`]
+  })
+  return [
+    'DOMAIN-SUFFIX,jc116.com,DIRECT',
+    'DOMAIN-SUFFIX,sxnn.de,DIRECT',
+    ...new Set(hosts),
+  ]
 }

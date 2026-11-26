@@ -1,4 +1,12 @@
 export const DOMESTIC_API_DIRECT_RULE = 'DOMAIN,api.sxnn.de,DIRECT'
+export const MANAGED_DIRECT_RULES = [
+  DOMESTIC_API_DIRECT_RULE,
+  'DOMAIN,sxy-api.52nm.de,DIRECT',
+  'DOMAIN,sxy.52nm.de,DIRECT',
+]
+
+export const isManagedDirectRule = (rule: unknown): boolean =>
+  typeof rule === 'string' && MANAGED_DIRECT_RULES.includes(rule)
 
 type RuleConfig = Record<string, unknown>
 const keys = ['prepend-rules', 'append-rules'] as const
@@ -18,20 +26,22 @@ export function pinApiDirect(data: RuleConfig): RuleConfig {
   return {
     ...data,
     'prepend-rules': [
-      DOMESTIC_API_DIRECT_RULE,
+      ...MANAGED_DIRECT_RULES,
       ...rulesAt(data, 'prepend-rules').filter(
-        (rule) => rule !== DOMESTIC_API_DIRECT_RULE,
+        (rule) => !isManagedDirectRule(rule),
       ),
     ],
     'append-rules': rulesAt(data, 'append-rules').filter(
-      (rule) => rule !== DOMESTIC_API_DIRECT_RULE,
+      (rule) => !isManagedDirectRule(rule),
     ),
   }
 }
 
 export function upsertTrafficRule(data: RuleConfig, rule: string): RuleConfig {
-  if (targetOf(rule) === 'DOMAIN,api.sxnn.de') {
-    throw new Error('api.sxnn.de 始终使用直连，无需添加规则')
+  if (
+    MANAGED_DIRECT_RULES.some((managed) => targetOf(managed) === targetOf(rule))
+  ) {
+    throw new Error('官方入口始终使用直连，无需添加规则')
   }
   const next = { ...data }
   for (const key of keys) {

@@ -40,7 +40,13 @@ test('Mac Home update downloads the NAS DMG for each architecture without instal
     read('src/services/update.ts'),
   ])
   const downloadUrl = actualArrow(service, 'macosDufsDownloadUrl', {
-    DUFS_DOWNLOAD_BASE: 'https://sxy.sxnn.de:5443/sxy',
+    getEndpoints: () => ({ download_base: 'https://sxy.52nm.de:5443' }),
+    ALTERNATE_DOWNLOAD_BASE: 'https://sxy.52nm.de:5443',
+    LEGACY_DOWNLOAD_BASE: 'https://sxy.sxnn.de:5443',
+    fetchWithVerifiedTls: async (_url, options) => {
+      assert.equal(options.method, 'HEAD')
+      return new Response(null, { headers: { 'Content-Length': '100' } })
+    },
   })
   for (const [arch, file] of [
     ['aarch64', '神仙云.dmg'],
@@ -63,7 +69,7 @@ test('Mac Home update downloads the NAS DMG for each architecture without instal
       relaunch: () => assert.fail('manual download must not restart the app'),
     })()
     assert.deepEqual(urls, [
-      `https://sxy.sxnn.de:5443/sxy/${encodeURIComponent(file)}`,
+      `https://sxy.52nm.de:5443/sxy/${encodeURIComponent(file)}`,
     ])
   }
 })
@@ -74,7 +80,13 @@ test('unknown or unavailable Mac architecture falls back to the matching release
     read('src/services/update.ts'),
   ])
   const downloadUrl = actualArrow(service, 'macosDufsDownloadUrl', {
-    DUFS_DOWNLOAD_BASE: 'https://sxy.sxnn.de:5443/sxy',
+    getEndpoints: () => ({ download_base: 'https://sxy.52nm.de:5443' }),
+    ALTERNATE_DOWNLOAD_BASE: 'https://sxy.52nm.de:5443',
+    LEGACY_DOWNLOAD_BASE: 'https://sxy.sxnn.de:5443',
+    fetchWithVerifiedTls: async (_url, options) => {
+      assert.equal(options.method, 'HEAD')
+      return new Response(null, { headers: { 'Content-Length': '100' } })
+    },
   })
   for (const getAppArch of [
     async () => 'unknown',
@@ -103,14 +115,46 @@ test('unknown or unavailable Mac architecture falls back to the matching release
   }
 })
 
-test('configured metadata endpoints keep Dufs before GitHub', async () => {
-  const config = JSON.parse(await read('src-tauri/tauri.conf.json'))
-  const endpoints = config.plugins.updater.endpoints
+test('unreachable Mac mirrors fall back to the matching release', async () => {
+  const [home, service] = await Promise.all([
+    read('src/pages/home.tsx'),
+    read('src/services/update.ts'),
+  ])
+  const probes = []
+  const opened = []
+  const fallback = 'https://github.com/abxian/shenxianyun/releases/tag/v2.5.58'
+  const downloadUrl = actualArrow(service, 'macosDufsDownloadUrl', {
+    getEndpoints: () => ({ download_base: 'https://sxy.sxnn.de:5443' }),
+    ALTERNATE_DOWNLOAD_BASE: 'https://sxy.52nm.de:5443',
+    LEGACY_DOWNLOAD_BASE: 'https://sxy.sxnn.de:5443',
+    fetchWithVerifiedTls: async (url) => {
+      probes.push(new URL(url).hostname)
+      throw Error('unreachable')
+    },
+  })
+  await actualArrow(home, 'doUpdate', {
+    updateInfo: { available: true, version: '2.5.58' },
+    updating: false,
+    isMacOS: true,
+    getAppArch: async () => 'aarch64',
+    macosDufsDownloadUrl: downloadUrl,
+    releaseUrlForVersion: () => fallback,
+    openWebUrl: async (url) => opened.push(url),
+  })()
+  assert.deepEqual(probes, ['sxy.sxnn.de', 'sxy.52nm.de'])
+  assert.deepEqual(opened, [fallback])
+})
 
-  assert.match(endpoints[0], /^https:\/\/sxy\.sxnn\.de:5443\/sxy\//)
-  assert.match(endpoints[1], /^http:\/\/114\.80\.36\.225:5011\/sxy\//)
-  assert.match(endpoints[2], /github\.com\/abxian\/shenxianyun/)
-  assert.match(endpoints[3], /^https:\/\/github\.com\/abxian\/shenxianyun/)
+test('configured metadata endpoints keep both HTTPS Dufs sources', async () => {
+  const config = JSON.parse(await read('src-tauri/tauri.conf.json'))
+  assert.deepEqual(config.plugins.updater.endpoints.slice(0, 2), [
+    'https://sxy.52nm.de:5443/sxy/update.json',
+    'https://sxy.sxnn.de:5443/sxy/update.json',
+  ])
+  assert.equal(
+    config.plugins.updater.endpoints.at(-1),
+    'https://github.com/abxian/shenxianyun/releases/download/updater/update.json',
+  )
 })
 
 test('Windows update entry points use the in-app fallback command', async () => {

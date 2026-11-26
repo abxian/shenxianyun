@@ -118,12 +118,12 @@ import {
   getManagementProxy,
   getApiBase,
   getBootstrapProxy,
-  initEndpointDiscovery,
   listApiBases,
   officialDirectRules,
   pickApiBase,
-  probeApiBase,
+  refreshEndpoints,
   rotateApiBase,
+  routeManagedRequest,
 } from '@/services/endpoint-resolver'
 import {
   assertRequestActive,
@@ -184,7 +184,8 @@ import {
 } from '@/services/subscription-monitor'
 import { refreshWithFeedback } from '@/services/subscription-refresh-feedback'
 import {
-  DOMESTIC_API_DIRECT_RULE,
+  isManagedDirectRule,
+  MANAGED_DIRECT_RULES,
   pinApiDirect,
   upsertTrafficRule,
   removeTrafficRule,
@@ -735,8 +736,13 @@ const ensureDomesticApiDirect = async () => {
     ? (data['prepend-rules'] as unknown[])
     : []
   if (
-    prepend[0] === DOMESTIC_API_DIRECT_RULE &&
-    prepend.filter((rule) => rule === DOMESTIC_API_DIRECT_RULE).length === 1
+    MANAGED_DIRECT_RULES.every((rule, index) => prepend[index] === rule) &&
+    prepend.filter(isManagedDirectRule).length ===
+      MANAGED_DIRECT_RULES.length &&
+    !(
+      Array.isArray(data['append-rules']) &&
+      data['append-rules'].some(isManagedDirectRule)
+    )
   )
     return
   if (
@@ -955,7 +961,8 @@ const HomePage = () => {
     if (isMacOS) {
       const arch = await getAppArch().catch(() => null)
       const downloadUrl =
-        macosDufsDownloadUrl(arch) ?? releaseUrlForVersion(updateInfo.version)
+        (await macosDufsDownloadUrl(arch)) ??
+        releaseUrlForVersion(updateInfo.version)
       await openWebUrl(downloadUrl).catch(() => undefined)
       return
     }
@@ -1235,11 +1242,12 @@ const HomePage = () => {
   // 逐层重试，解决 OpenClash/fake-ip 误路由、首装用户连不上 web 验证提取码的问题。
   const apiFetch = useCallback(
     async (
-      url: string,
+      requestedUrl: string,
       init: Parameters<typeof tauriFetch>[1],
     ): ReturnType<typeof tauriFetch> =>
       withRequestDeadline(
         async (signal) => {
+          const url = routeManagedRequest(requestedUrl)
           const guarded = { ...init, signal }
           const fetchPath = (options: Parameters<typeof tauriFetch>[1]) =>
             fetchBufferedWithDeadline(fetchWithVerifiedTls, url, options)
@@ -2714,14 +2722,10 @@ const HomePage = () => {
   // 服务器地址与切换过程完全交给客户端，只向高级用户展示汇总连通状态。
   const checkServerConnection = useCallback(async () => {
     setServerCheckStatus('checking')
-    const bases = listApiBases()
-    const results = await Promise.all(
-      bases.map((base) => probeApiBase(base, proxyUrlRef.current || undefined)),
+    await refreshEndpoints()
+    const connected = Boolean(
+      await pickApiBase(proxyUrlRef.current || undefined),
     )
-    const connected = results.some(Boolean)
-    if (connected) {
-      await pickApiBase(proxyUrlRef.current || undefined).catch(() => undefined)
-    }
     setServerCheckStatus(connected ? 'connected' : 'disconnected')
     return connected
   }, [])
@@ -2729,12 +2733,8 @@ const HomePage = () => {
   // 端点发现：启动时后台拉取 endpoints.json 并探测可用 API 基址。
   // 失败静默（用缓存/内置默认兜底），不阻塞任何功能。
   useEffect(() => {
-    initEndpointDiscovery(proxyUrlRef.current || undefined)
-      .catch(() => undefined)
-      .finally(() => {
-        ensureDomesticApiDirect().catch(() => undefined)
-        checkServerConnection().catch(() => undefined)
-      })
+    void ensureDomesticApiDirect().catch(() => undefined)
+    void checkServerConnection().catch(() => undefined)
     // 启动瞬间核心/系统代理可能未就绪，10 秒后快速复测一次，尽快纠正误报
     const quick = window.setTimeout(() => {
       checkServerConnection().catch(() => undefined)
@@ -4867,7 +4867,7 @@ const HomePage = () => {
         : []
       setTrafficRules(
         [...prepend, ...append]
-          .filter((rule) => rule !== DOMESTIC_API_DIRECT_RULE)
+          .filter((rule) => !isManagedDirectRule(rule))
           .map(parseTrafficRule)
           .filter((item): item is TrafficRuleItem => Boolean(item)),
       )

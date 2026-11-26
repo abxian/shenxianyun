@@ -68,6 +68,7 @@ fn is_official_rule(rule: &Value) -> bool {
     let kind = parts[0].to_ascii_uppercase();
     let value = parts[1].trim_end_matches('.').to_ascii_lowercase();
     match kind.as_str() {
+        "DOMAIN" if matches!(value.as_str(), "sxy-api.52nm.de" | "sxy.52nm.de") => true,
         "DOMAIN" | "DOMAIN-SUFFIX" => ["sxnn.de", "jc116.com"]
             .iter()
             .any(|root| value == *root || value.ends_with(&format!(".{root}"))),

@@ -5,6 +5,7 @@ import yaml from 'js-yaml'
 
 import {
   DOMESTIC_API_DIRECT_RULE as api,
+  MANAGED_DIRECT_RULES,
   pinApiDirect,
   upsertTrafficRule,
   removeTrafficRule,
@@ -20,11 +21,14 @@ it('persists edits below API, replaces a target and removes both legacy location
   const edited = yaml.load(
     yaml.dump(upsertTrafficRule(original, 'DOMAIN,example.com,Test')),
   )
-  assert.deepEqual(edited['prepend-rules'], [api, 'DOMAIN,example.com,Test'])
+  assert.deepEqual(edited['prepend-rules'], [
+    ...MANAGED_DIRECT_RULES,
+    'DOMAIN,example.com,Test',
+  ])
   assert.deepEqual(edited['append-rules'], ['DOMAIN,other.example,DIRECT'])
   assert.deepEqual(edited.dns, original.dns)
   const deleted = removeTrafficRule(edited, 'DOMAIN,example.com,Test')
-  assert.deepEqual(deleted['prepend-rules'], [api])
+  assert.deepEqual(deleted['prepend-rules'], MANAGED_DIRECT_RULES)
   assert.deepEqual(original['prepend-rules'], [
     'DOMAIN,example.com,DIRECT',
     api,
@@ -35,6 +39,10 @@ it('persists edits below API, replaces a target and removes both legacy location
 it('rejects API override and reports failed validation rather than success', async () => {
   assert.throws(
     () => upsertTrafficRule({}, 'DOMAIN,api.sxnn.de,Test'),
+    /始终使用直连/,
+  )
+  assert.throws(
+    () => upsertTrafficRule({}, 'DOMAIN,sxy-api.52nm.de,Test'),
     /始终使用直连/,
   )
   let calls = 0

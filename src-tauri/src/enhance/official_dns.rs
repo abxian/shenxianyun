@@ -1,6 +1,7 @@
 use serde_yaml_ng::{Mapping, Value};
 
 const ROOTS: [&str; 2] = ["sxnn.de", "jc116.com"];
+const EXACT_HOSTS: [&str; 2] = ["sxy-api.52nm.de", "sxy.52nm.de"];
 const SERVERS: [&str; 2] = [
     "https://223.5.5.5/dns-query#DIRECT",
     "https://1.12.12.12/dns-query#DIRECT",
@@ -12,9 +13,10 @@ fn official_domain(key: &str) -> bool {
         .strip_prefix("+.")
         .or_else(|| normalized.strip_prefix("*."))
         .unwrap_or(&normalized);
-    ROOTS
-        .iter()
-        .any(|root| domain == *root || domain.ends_with(&format!(".{root}")))
+    EXACT_HOSTS.contains(&domain)
+        || ROOTS
+            .iter()
+            .any(|root| domain == *root || domain.ends_with(&format!(".{root}")))
 }
 
 /// The website's connection and its DNS lookup must both survive a dead proxy.
@@ -47,6 +49,9 @@ pub fn apply(config: &mut Mapping) -> Result<(), String> {
     for root in ROOTS {
         policy.insert(format!("+.{root}").into(), servers.clone());
     }
+    for host in EXACT_HOSTS {
+        policy.insert(host.into(), servers.clone());
+    }
     Ok(())
 }
 
@@ -67,8 +72,11 @@ mod tests {
         assert_eq!(config["dns"]["respect-rules"], true);
         assert_eq!(config["dns"]["nameserver"], before["dns"]["nameserver"]);
         let policy = config["dns"]["nameserver-policy"].as_mapping().ok_or("policy")?;
-        assert_eq!(policy.len(), 5);
+        assert_eq!(policy.len(), 7);
         assert!(!policy.contains_key("api.sxnn.de"));
+        assert_eq!(policy["sxy-api.52nm.de"][0], SERVERS[0]);
+        assert_eq!(policy["sxy.52nm.de"][0], SERVERS[0]);
+        assert!(!policy.contains_key("+.52nm.de"));
         assert_eq!(policy["+.sxnn.de"][0], SERVERS[0]);
         for domain in ["+.example.com", "evil-sxnn.de", "sxnn.de.evil.example"] {
             assert_eq!(policy[domain], before["dns"]["nameserver-policy"][domain]);

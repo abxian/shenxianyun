@@ -8,7 +8,14 @@ import {
 
 import { version as appVersion } from '@root/package.json'
 
-import { getManagementProxy } from './endpoint-resolver'
+import {
+  ALTERNATE_DOWNLOAD_BASE,
+  fetchWithVerifiedTls,
+  getEndpoints,
+  getManagementProxy,
+  LEGACY_DOWNLOAD_BASE,
+  refreshEndpoints,
+} from './endpoint-resolver'
 
 export type VersionParts = {
   main: number[]
@@ -197,25 +204,37 @@ export const releaseUrlForVersion = (version?: string | null) => {
     : `${SHENXIANYUN_RELEASES_URL}/latest`
 }
 
-// Dufs 上的固定下载入口（始终指向当前正式版，不带版本号）。
-// 这些文件名由 NAS 同步脚本 nas-sync-release-to-dufs.py 的固定别名表决定，
-// 改名必须两边一起改，否则这里会 404。
-const DUFS_DOWNLOAD_BASE = 'https://sxy.sxnn.de:5443/sxy'
+/** macOS 使用对应架构的正式 DMG，先确认镜像可访问。 */
+export const macosDufsDownloadUrl = async (arch?: string | null) => {
+  const file =
+    arch === 'x86_64'
+      ? '神仙云-Intel.dmg'
+      : arch === 'aarch64'
+        ? '神仙云.dmg'
+        : null
+  if (!file) return null
 
-/**
- * macOS 的 Dufs 直接下载地址。
- *
- * macOS 不走应用内更新（用户要的是直接下载安装包），所以按 CPU 架构给出
- * 对应的 dmg：Apple 芯片用 aarch64 包，Intel 用 x64 包。
- * 架构取不到时返回 null，调用方回退到 GitHub Release 页面 —— 宁可让用户
- * 自己在页面上挑，也好过猜错架构给一个装不上的包。
- */
-export const macosDufsDownloadUrl = (arch?: string | null) => {
-  if (arch === 'x86_64') {
-    return `${DUFS_DOWNLOAD_BASE}/${encodeURIComponent('神仙云-Intel.dmg')}`
-  }
-  if (arch === 'aarch64') {
-    return `${DUFS_DOWNLOAD_BASE}/${encodeURIComponent('神仙云.dmg')}`
+  const endpoints = getEndpoints() ?? (await refreshEndpoints())
+  const bases = [
+    ...new Set([
+      endpoints?.download_base,
+      ALTERNATE_DOWNLOAD_BASE,
+      LEGACY_DOWNLOAD_BASE,
+    ]),
+  ]
+  for (const base of bases) {
+    if (!base?.startsWith('https://')) continue
+    const url = `${base}/sxy/${encodeURIComponent(file)}`
+    try {
+      const response = await fetchWithVerifiedTls(url, {
+        method: 'HEAD',
+        signal: AbortSignal.timeout(2500),
+      })
+      if (response.ok && Number(response.headers.get('Content-Length')) > 0)
+        return url
+    } catch {
+      // Try the next mirror.
+    }
   }
   return null
 }

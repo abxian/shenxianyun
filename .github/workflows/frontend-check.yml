@@ -132,6 +132,10 @@ jobs:
         if: steps.check_frontend.outputs.frontend == 'true'
         run: pnpm test:managed-subscription
 
+      - name: Verify endpoint discovery and updater fallback
+        if: steps.check_frontend.outputs.frontend == 'true'
+        run: node --test scripts/test-endpoint-failover.mjs scripts/test-updater-fallback.mjs
+
       - name: Run presence throttle tests
         if: steps.check_frontend.outputs.frontend == 'true'
         run: pnpm test:presence-throttle
