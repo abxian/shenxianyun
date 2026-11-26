@@ -136,3 +136,19 @@ test('existing managed requests switch only between authenticated service aliase
   api.setActiveApiBase('https://unknown.example')
   assert.equal(api.routeManagedRequest(subscription), subscription)
 })
+
+test('a later authenticated manifest can move an existing device to a third domain', async () => {
+  const future = 'https://standby.example'
+  const api = resolver(async (url) => {
+    if (url.endsWith('endpoints.json')) return Response.json(manifest(future))
+    if (url.startsWith(future)) return healthy()
+    throw new Error('old domain unavailable')
+  })
+  await api.refreshEndpoints()
+  assert.equal(await api.pickApiBase(), future)
+  const saved = `${alternate}/managed-sub/synthetic-token`
+  assert.equal(
+    api.routeManagedRequest(saved),
+    `${future}/managed-sub/synthetic-token`,
+  )
+})

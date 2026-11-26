@@ -20,7 +20,6 @@ export const PINNED_API_BASES = [
 export const ALTERNATE_API_BASE = 'https://sxy-api.52nm.de:5443'
 export const ALTERNATE_DOWNLOAD_BASE = 'https://sxy.52nm.de:5443'
 export const LEGACY_DOWNLOAD_BASE = 'https://sxy.sxnn.de:5443'
-const LEGACY_API_BASE = 'http://114.80.36.225:5010'
 const RETIRED_API_HOSTS = new Set(['sub.jc116.com'])
 export const DEFAULT_API_BASE = PINNED_API_BASES[0]
 
@@ -36,21 +35,22 @@ const allApiBases = (): string[] => {
       ),
       ALTERNATE_API_BASE,
       'https://sxnn.de',
-      ...discovered.filter((base) => base.startsWith('http:')),
-      LEGACY_API_BASE,
     ]),
   ]
 }
 
-const DISCOVERY_URLS = [
+const AUTHORITATIVE_DISCOVERY_URLS = [
   `${ALTERNATE_DOWNLOAD_BASE}/endpoints.json`,
-  `${LEGACY_DOWNLOAD_BASE}/endpoints.json`,
   'https://raw.githubusercontent.com/abxian/shenxianyun-config/main/endpoints.json',
+]
+const LEGACY_DISCOVERY_URLS = [
+  `${LEGACY_DOWNLOAD_BASE}/endpoints.json`,
   'https://sxnn.de/api/endpoints',
 ]
 
 const STORAGE_KEY = 'shenxianyun.endpoints'
 const ACTIVE_BASE_KEY = 'shenxianyun.apiBaseActive'
+const TRUSTED_BASES_KEY = 'shenxianyun.trustedApiBases'
 
 export type Endpoints = {
   version?: number
@@ -128,17 +128,54 @@ const readCache = (): Endpoints | null => {
 /** 当前应使用的 API 基址：探测出的可用地址 > 缓存列表第一个 > 内置默认。同步、永不抛错。 */
 export const getApiBase = (): string => {
   const active = normalizeBase(localStorage.getItem(ACTIVE_BASE_KEY))
-  if (active) return active
-  return allApiBases()[0] || DEFAULT_API_BASE
+  const candidates = allApiBases()
+  return candidates.includes(active)
+    ? active
+    : candidates[0] || DEFAULT_API_BASE
 }
 
-/** Keep the saved device credential while switching between verified aliases of the same service. */
-export const routeManagedRequest = (url: string): string => {
-  if (getApiBase() !== ALTERNATE_API_BASE) return url
+const trustedManagedOrigins = (): Set<string> => {
+  const origins = new Set([
+    DEFAULT_API_BASE,
+    ALTERNATE_API_BASE,
+    'https://sxnn.de',
+  ])
+  try {
+    const bases: unknown = JSON.parse(
+      localStorage.getItem(TRUSTED_BASES_KEY) || '[]',
+    )
+    if (Array.isArray(bases)) {
+      for (const value of bases) {
+        const base = normalizeBase(value)
+        if (base.startsWith('https://')) origins.add(new URL(base).origin)
+      }
+    }
+  } catch {
+    // An unreadable cache leaves the built-in service aliases available.
+  }
+  return origins
+}
+
+/** Route existing credentials between authenticated aliases of the same service. */
+export const routeManagedRequest = (
+  url: string,
+  savedApiBase?: string,
+  savedSubscriptionUrl?: string,
+): string => {
   try {
     const source = new URL(url)
+    const target = new URL(getApiBase())
+    const trusted = trustedManagedOrigins()
+    const sameSavedApi =
+      savedApiBase && source.origin === new URL(savedApiBase).origin
     if (
-      ![DEFAULT_API_BASE, 'https://sxnn.de'].includes(source.origin) ||
+      source.origin === target.origin ||
+      !trusted.has(target.origin) ||
+      !(
+        trusted.has(source.origin) ||
+        sameSavedApi ||
+        url === savedSubscriptionUrl
+      ) ||
       source.username ||
       source.password ||
       !/^\/(?:managed-sub\/[^/]+|api\/v2\/client\/(?:verify|state|subscription|heartbeat|offline|relay|traffic))$/.test(
@@ -146,7 +183,7 @@ export const routeManagedRequest = (url: string): string => {
       )
     )
       return url
-    return `${ALTERNATE_API_BASE}${source.pathname}${source.search}`
+    return `${target.origin}${source.pathname}${source.search}`
   } catch {
     return url
   }
@@ -188,7 +225,17 @@ export const refreshEndpoints = (): Promise<Endpoints | null> => {
     Date.now() - discoveredAt < DISCOVERY_INTERVAL_MS
   )
     return Promise.resolve(readCache())
-  discoveryInFlight = Promise.any(DISCOVERY_URLS.map(fetchDiscovery))
+  discoveryInFlight = Promise.any(
+    AUTHORITATIVE_DISCOVERY_URLS.map(fetchDiscovery),
+  )
+    .then((parsed) => {
+      localStorage.setItem(
+        TRUSTED_BASES_KEY,
+        JSON.stringify([...(parsed.api_bases ?? []), parsed.sub_base]),
+      )
+      return parsed
+    })
+    .catch(() => Promise.any(LEGACY_DISCOVERY_URLS.map(fetchDiscovery)))
     .then((parsed) => {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
       discoveredAt = Date.now()

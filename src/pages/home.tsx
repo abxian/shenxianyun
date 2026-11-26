@@ -1247,7 +1247,12 @@ const HomePage = () => {
     ): ReturnType<typeof tauriFetch> =>
       withRequestDeadline(
         async (signal) => {
-          const url = routeManagedRequest(requestedUrl)
+          const auth = managedAuthRef.current
+          const url = routeManagedRequest(
+            requestedUrl,
+            auth?.apiBase,
+            auth?.subscriptionUrl,
+          )
           const guarded = { ...init, signal }
           const fetchPath = (options: Parameters<typeof tauriFetch>[1]) =>
             fetchBufferedWithDeadline(fetchWithVerifiedTls, url, options)
