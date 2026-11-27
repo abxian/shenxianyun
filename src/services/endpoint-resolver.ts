@@ -230,9 +230,7 @@ export const refreshEndpoints = (force = false): Promise<Endpoints | null> => {
     Date.now() - discoveredAt < DISCOVERY_INTERVAL_MS
   )
     return Promise.resolve(readCache())
-  discoveryInFlight = Promise.any(
-    PRIMARY_DISCOVERY_URLS.map(fetchDiscovery),
-  )
+  discoveryInFlight = Promise.any(PRIMARY_DISCOVERY_URLS.map(fetchDiscovery))
     .catch(() => Promise.any(AUTHORITATIVE_DISCOVERY_URLS.map(fetchDiscovery)))
     .then((parsed) => {
       localStorage.setItem(
