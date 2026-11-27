@@ -39,6 +39,10 @@ const allApiBases = (): string[] => {
   ]
 }
 
+const PRIMARY_DISCOVERY_URLS = [
+  'https://domains.52nm.de:5443/v1/shenxianyun.json',
+  'https://raw.githubusercontent.com/abxian/domain-config/main/manifests/shenxianyun.json',
+]
 const AUTHORITATIVE_DISCOVERY_URLS = [
   `${ALTERNATE_DOWNLOAD_BASE}/endpoints.json`,
   'https://raw.githubusercontent.com/abxian/shenxianyun-config/main/endpoints.json',
@@ -227,8 +231,9 @@ export const refreshEndpoints = (force = false): Promise<Endpoints | null> => {
   )
     return Promise.resolve(readCache())
   discoveryInFlight = Promise.any(
-    AUTHORITATIVE_DISCOVERY_URLS.map(fetchDiscovery),
+    PRIMARY_DISCOVERY_URLS.map(fetchDiscovery),
   )
+    .catch(() => Promise.any(AUTHORITATIVE_DISCOVERY_URLS.map(fetchDiscovery)))
     .then((parsed) => {
       localStorage.setItem(
         TRUSTED_BASES_KEY,
