@@ -965,7 +965,7 @@ const HomePage = () => {
     if (isMacOS) {
       const arch = await getAppArch().catch(() => null)
       const downloadUrl =
-        (await macosDufsDownloadUrl(arch)) ??
+        (await macosDufsDownloadUrl(arch, updateInfo.version)) ??
         releaseUrlForVersion(updateInfo.version)
       await openWebUrl(downloadUrl).catch(() => undefined)
       return

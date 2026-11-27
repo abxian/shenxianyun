@@ -1,10 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import {
-  check,
-  type CheckOptions,
-  type Update,
-} from '@tauri-apps/plugin-updater'
+import { check, type CheckOptions, Update } from '@tauri-apps/plugin-updater'
 
 import { version as appVersion } from '@root/package.json'
 
@@ -161,7 +157,7 @@ export const resolveRemoteVersion = (update: Update): string | null => {
 
 const localVersionNormalized = normalizeVersion(appVersion)
 
-export const checkUpdateSafe = async (
+const checkConfiguredUpdate = async (
   options?: CheckOptions,
 ): Promise<Update | null> => {
   let result: Update | null
@@ -197,6 +193,38 @@ export const checkUpdateSafe = async (
   return result
 }
 
+export const checkUpdateSafe = async (
+  options?: CheckOptions,
+): Promise<Update | null> => {
+  const configured = checkConfiguredUpdate(options)
+  const discovered = async () => {
+    const endpoints = getEndpoints() ?? (await refreshEndpoints())
+    if (!endpoints?.download_base) return null
+    const metadata = await invoke<
+      ConstructorParameters<typeof Update>[0] | null
+    >('check_discovered_app_update', { downloadBase: endpoints.download_base })
+    return metadata ? new Update(metadata) : null
+  }
+  const [fallback, mirror] = await Promise.allSettled([
+    configured,
+    options ? Promise.resolve(null) : discovered(),
+  ])
+  if (mirror.status === 'fulfilled' && mirror.value) {
+    if (fallback.status !== 'fulfilled' || !fallback.value) return mirror.value
+    const comparison = compareVersions(
+      resolveRemoteVersion(mirror.value),
+      resolveRemoteVersion(fallback.value),
+    )
+    const useMirror = comparison !== null && comparison >= 0
+    await (useMirror ? fallback.value : mirror.value)
+      .close()
+      .catch(() => undefined)
+    return useMirror ? mirror.value : fallback.value
+  }
+  if (fallback.status === 'fulfilled') return fallback.value
+  throw fallback.reason
+}
+
 export const releaseUrlForVersion = (version?: string | null) => {
   const normalized = ensureSemver(version)
   return normalized
@@ -222,15 +250,34 @@ export const availableInstallerUrl = async (value?: string | null) => {
 }
 
 /** macOS 使用对应架构的正式 DMG，先确认镜像可访问。 */
-export const macosDufsDownloadUrl = async (arch?: string | null) => {
+export const macosDufsDownloadUrl = async (
+  arch: string | null,
+  version: string,
+) => {
   const file =
     arch === 'x86_64'
       ? '神仙云-Intel.dmg'
       : arch === 'aarch64'
         ? '神仙云.dmg'
         : null
-  if (!file) return null
+  const expected = ensureSemver(version)
+  if (!file || !expected) return null
 
+  const installerOn = async (base: string) => {
+    try {
+      const manifest = await fetchWithVerifiedTls(`${base}/sxy/update.json`, {
+        signal: AbortSignal.timeout(2500),
+      })
+      if (
+        !manifest.ok ||
+        ensureSemver((await manifest.json()).version) !== expected
+      )
+        return null
+      return availableInstallerUrl(`${base}/sxy/${encodeURIComponent(file)}`)
+    } catch {
+      return null
+    }
+  }
   const endpoints = getEndpoints() ?? (await refreshEndpoints())
   const bases = [
     ...new Set([
@@ -241,14 +288,12 @@ export const macosDufsDownloadUrl = async (arch?: string | null) => {
   ]
   for (const base of bases) {
     if (!base?.startsWith('https://')) continue
-    const url = await availableInstallerUrl(
-      `${base}/sxy/${encodeURIComponent(file)}`,
-    )
+    const url = await installerOn(base)
     if (url) return url
   }
   const replacement = (await refreshEndpoints(true))?.download_base
   return replacement && !bases.includes(replacement)
-    ? availableInstallerUrl(`${replacement}/sxy/${encodeURIComponent(file)}`)
+    ? installerOn(replacement)
     : null
 }
 
