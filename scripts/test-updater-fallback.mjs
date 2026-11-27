@@ -37,6 +37,7 @@ function actualArrow(source, name, ports) {
 function macDownload(service, ports) {
   return actualArrow(service, 'macosDufsDownloadUrl', {
     refreshEndpoints: async () => null,
+    ensureSemver: (value) => (typeof value === 'string' ? value : null),
     ...ports,
     availableInstallerUrl: actualArrow(service, 'availableInstallerUrl', ports),
   })
@@ -52,8 +53,9 @@ test('Mac Home update downloads the NAS DMG for each architecture without instal
     ALTERNATE_DOWNLOAD_BASE: 'https://sxy.52nm.de:5443',
     LEGACY_DOWNLOAD_BASE: 'https://sxy.sxnn.de:5443',
     fetchWithVerifiedTls: async (_url, options) => {
-      assert.equal(options.method, 'HEAD')
-      return new Response(null, { headers: { 'Content-Length': '100' } })
+      return options.method === 'HEAD'
+        ? new Response(null, { headers: { 'Content-Length': '100' } })
+        : Response.json({ version: '2.5.47' })
     },
   })
   for (const [arch, file] of [
@@ -92,8 +94,9 @@ test('unknown or unavailable Mac architecture falls back to the matching release
     ALTERNATE_DOWNLOAD_BASE: 'https://sxy.52nm.de:5443',
     LEGACY_DOWNLOAD_BASE: 'https://sxy.sxnn.de:5443',
     fetchWithVerifiedTls: async (_url, options) => {
-      assert.equal(options.method, 'HEAD')
-      return new Response(null, { headers: { 'Content-Length': '100' } })
+      return options.method === 'HEAD'
+        ? new Response(null, { headers: { 'Content-Length': '100' } })
+        : Response.json({ version: '2.5.47' })
     },
   })
   for (const getAppArch of [
@@ -153,7 +156,7 @@ test('unreachable Mac mirrors fall back to the matching release', async () => {
   assert.deepEqual(opened, [fallback])
 })
 
-test('a stale download cache rediscovers the new mirror after both known hosts fail', async () => {
+test('a stale download cache checks a replacement after both known mirrors report an older release', async () => {
   const service = await read('src/services/update.ts')
   const future = 'https://downloads.example'
   const downloadUrl = macDownload(service, {
@@ -164,14 +167,15 @@ test('a stale download cache rediscovers the new mirror after both known hosts f
       assert.equal(force, true)
       return { download_base: future }
     },
-    fetchWithVerifiedTls: async (url) =>
-      new Response(null, {
-        status: url.startsWith(future) ? 200 : 503,
-        headers: { 'Content-Length': '100' },
-      }),
+    fetchWithVerifiedTls: async (url, options) => {
+      if (!url.startsWith(future)) return Response.json({ version: '2.5.46' })
+      return options.method === 'HEAD'
+        ? new Response(null, { headers: { 'Content-Length': '100' } })
+        : Response.json({ version: '2.5.47' })
+    },
   })
   assert.equal(
-    await downloadUrl('aarch64'),
+    await downloadUrl('aarch64', '2.5.47'),
     `${future}/sxy/${encodeURIComponent('神仙云.dmg')}`,
   )
 })
