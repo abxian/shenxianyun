@@ -269,7 +269,9 @@ export const downloadAndInstallWithFallback = async (
     ({ payload }) => onProgress?.(payload),
   )
   try {
+    const endpoints = (await refreshEndpoints(true)) ?? getEndpoints()
     await invoke<void>('install_app_update_with_fallback', {
+      downloadBase: endpoints?.download_base ?? null,
       expectedVersion,
     })
   } finally {
