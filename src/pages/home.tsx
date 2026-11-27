@@ -3291,7 +3291,10 @@ const HomePage = () => {
           selected = true
         }
         setManualImportUrl('')
-        if (external) setOtherImportOpen(false)
+        if (external) {
+          setOtherImportOpen(false)
+          setLocalWorkspace(true)
+        }
         await Promise.allSettled([mutateProfiles(), refreshAll()])
         setStatus(select ? '订阅已导入并切换' : '订阅已保存，可在配置列表切换')
       } catch {
