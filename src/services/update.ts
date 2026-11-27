@@ -198,7 +198,7 @@ export const checkUpdateSafe = async (
 ): Promise<Update | null> => {
   const configured = checkConfiguredUpdate(options)
   const discovered = async () => {
-    const endpoints = getEndpoints() ?? (await refreshEndpoints())
+    const endpoints = (await refreshEndpoints(true)) ?? getEndpoints()
     if (!endpoints?.download_base) return null
     const metadata = await invoke<
       ConstructorParameters<typeof Update>[0] | null
