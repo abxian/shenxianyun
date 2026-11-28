@@ -120,6 +120,7 @@ jobs:
         run: pnpm test:startup-refresh
 
       - name: Code switch disconnect transaction tests
+        if: steps.check_frontend.outputs.frontend == 'true'
         run: pnpm test:code-switch
 
       - name: Update cancellation and managed subscription recovery
