@@ -107,7 +107,12 @@ jobs:
           fi
 
           cat > release.txt << EOF
-          ## 直接下载（点一下就能下）
+          ## 官网下载（最新版）
+
+          - Windows x64：[神仙云.exe](https://sxy.52nm.de:5443/sxy/%E7%A5%9E%E4%BB%99%E4%BA%91.exe)
+          - macOS Apple 芯片：[神仙云.dmg](https://sxy.52nm.de:5443/sxy/%E7%A5%9E%E4%BB%99%E4%BA%91.dmg)
+
+          ## GitHub 下载（本版本）
 
           | 系统 | 下载 |
           | --- | --- |
