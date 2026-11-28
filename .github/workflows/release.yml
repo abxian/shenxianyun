@@ -110,7 +110,9 @@ jobs:
           ## 官网下载（最新版）
 
           - Windows x64：[神仙云.exe](https://sxy.52nm.de:5443/sxy/%E7%A5%9E%E4%BB%99%E4%BA%91.exe)
+          - Windows ARM64：[神仙云-arm64.exe](https://sxy.52nm.de:5443/sxy/%E7%A5%9E%E4%BB%99%E4%BA%91-arm64.exe)
           - macOS Apple 芯片：[神仙云.dmg](https://sxy.52nm.de:5443/sxy/%E7%A5%9E%E4%BB%99%E4%BA%91.dmg)
+          - macOS Intel 芯片：[神仙云-Intel.dmg](https://sxy.52nm.de:5443/sxy/%E7%A5%9E%E4%BB%99%E4%BA%91-Intel.dmg)
 
           ## GitHub 下载（本版本）
 
